@@ -140,50 +140,65 @@ panel API token.
    - expiry **30 days** (or less);
    - the name, for example `edge-guard setup`.
 
-   They put it into the shell where Claude works, never into the chat:
+   The token goes into a header file on the machine where Claude runs, never into the chat:
    ```sh
-   read -rs EDGE_PANEL_TOKEN && export EDGE_PANEL_TOKEN     # paste, Enter
+   # the user runs this in their own terminal, pastes the token and presses Enter
+   install -d -m 700 ~/.config/edge-guard && umask 077 && \
+     read -rsp 'panel token: ' T && printf 'Authorization: Bearer %s\n' "$T" > ~/.config/edge-guard/panel.h && unset T
    ```
-   The user can type it with the `!` prefix in Claude Code, so it lands in that shell. On a remote
-   server, export it in the SSH session that Claude uses.
+   Claude Code's shell keeps no environment between commands, and an `-H "…token…"` argument shows up in
+   `ps`. So every call reads the header from the file: `curl -H @$HOME/.config/edge-guard/panel.h …`.
+
+   If the user pastes the token into the chat anyway:
+   - write it into that file with a heredoc;
+   - never repeat it;
+   - suggest revoking it after the setup, because it is now in the transcript.
+
+   The API calls run where the file is (usually the user's machine). The guard's key is then sent over
+   SSH straight into the server's env file (step 3).
 2. Claude creates the guard. The name is a slug and cannot be changed later. Suggest the server's short
    hostname, e.g. `app-1`:
    ```sh
    P=https://panel.example.com; G=app-1
-   curl -sS --fail-with-body -X POST "$P/api/guards" -H "Authorization: Bearer $EDGE_PANEL_TOKEN" \
+   curl -sS --fail-with-body -X POST "$P/api/guards" -H @$HOME/.config/edge-guard/panel.h \
      -H 'Content-Type: application/json' -d "{\"name\":\"$G\",\"description\":\"$(hostname)\"}" >/dev/null \
-     || echo "exists or failed — check: curl -s -H \"Authorization: Bearer \$EDGE_PANEL_TOKEN\" $P/api/guards/$G"
+     || echo "exists or failed — check: curl -s -H @\$HOME/.config/edge-guard/panel.h $P/api/guards/$G"
    ```
    **409 "already exists":** if it is this server's guard (the user confirms), reuse it and only make a
    new key. If it belongs to another server, pick another name.
-3. Claude makes the guard's key and writes it straight into the env file. The key is never printed: it
-   is shown only once, and only the file keeps it:
+3. Claude makes the guard's key and writes it straight into the server's env file. The key is never
+   printed: it is shown only once, and only the file keeps it. `S` is how Claude reaches the server, for
+   example `root@198.51.100.5`; leave it empty to run on this machine.
    ```sh
-   sudo install -d -m 750 -g edge-guard /etc/edge-guard 2>/dev/null || sudo install -d -m 750 /etc/edge-guard
-   sudo install -m 600 /dev/null /etc/edge-guard/env.new
-   curl -sS --fail-with-body -X POST "$P/api/guards/$G/tokens" -H "Authorization: Bearer $EDGE_PANEL_TOKEN" \
-     -H 'Content-Type: application/json' -d "{\"label\":\"$(hostname)\"}" \
+   S=root@198.51.100.5
+   run() { if [ -n "$S" ]; then ssh "$S" "$@"; else sudo sh -c "$*"; fi; }
+   run 'install -d -m 750 /etc/edge-guard'
+   curl -sS --fail-with-body -X POST "$P/api/guards/$G/tokens" -H @$HOME/.config/edge-guard/panel.h \
+     -H 'Content-Type: application/json' -d "{\"label\":\"$G\"}" \
      | python3 -c 'import json,sys; print("EDGE_GUARD_KEY="+json.load(sys.stdin)["token"])' \
-     | sudo tee /etc/edge-guard/env.new >/dev/null
-   sudo grep -q '^EDGE_GUARD_KEY=edgg\.' /etc/edge-guard/env.new && sudo mv /etc/edge-guard/env.new /etc/edge-guard/env
+     | run 'umask 077; cat > /etc/edge-guard/env.new && grep -q "^EDGE_GUARD_KEY=edgg\." /etc/edge-guard/env.new && mv /etc/edge-guard/env.new /etc/edge-guard/env'
+   run 'grep -c "^EDGE_GUARD_KEY=" /etc/edge-guard/env'      # 1 — the value is not shown
    ```
-   If `/etc/edge-guard/env` already holds other variables (site keys), append the line instead of
-   replacing the file. Check without printing the value: `sudo grep -c '^EDGE_GUARD_KEY=' /etc/edge-guard/env`.
+   - **Other variables already in the env file** (site keys): write to `env.new`, append the line to the
+     existing file, and remove `env.new`.
+   - **A failed request** prints the panel's error body, which holds no key, and the file is not replaced.
 4. Continue with steps 3–6 (IP, config, install, start). After the guard registers, it is visible at:
    ```sh
-   curl -s -H "Authorization: Bearer $EDGE_PANEL_TOKEN" "$P/api/guards/$G" \
+   curl -s -H @$HOME/.config/edge-guard/panel.h "$P/api/guards/$G" \
      | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["status"]["online"], [a["name"] for a in d["guard"]["apps"]])'
    ```
 5. Binding domains can be done by Claude as well (step 7, "Binding a domain through the API"), or by the
    user in the panel.
-6. At the end, tell the user to revoke the API token if it is not needed any more: «API-токены» →
-   revoke, or let it expire.
+6. At the end:
+   - tell the user to revoke the API token if it is not needed any more («API-токены» → revoke), or let it
+     expire;
+   - delete the header file: `rm ~/.config/edge-guard/panel.h`.
 
 The token acts as the user, with their permissions:
 - a staff user can create guards, but their guard may report only addresses in their allowed networks;
 - an admin's token can do everything.
 
-Never print or log `EDGE_PANEL_TOKEN` or the guard key.
+Never print or log the panel token or the guard key; never put them into a command line.
 
 **B · The user creates it in the panel** (no API token): **Guards → «Добавить guard»** → a name → the
 wizard shows the key once with a ready setup (config, install, systemd) and waits for the connection.
@@ -463,7 +478,7 @@ addresses, or to a separate IP:port. Never exempt URL paths.
 P=https://panel.example.com; G=app-1; APP=shop; SITE=shop; HOST=shop.example.com
 # the site: domain, Let's Encrypt, redirect to HTTPS, the pool → the guard's app
 # (to run it only on some nodes, add "nodes":["eu1","za1"])
-curl -sS --fail-with-body -X POST "$P/api/sites" -H "Authorization: Bearer $EDGE_PANEL_TOKEN" -H 'Content-Type: application/json' \
+curl -sS --fail-with-body -X POST "$P/api/sites" -H @$HOME/.config/edge-guard/panel.h -H 'Content-Type: application/json' \
   -d "{\"name\":\"$SITE\",\"hosts\":[\"$HOST\"],\"tls\":{\"acme\":true},\"redirect_https\":true,
        \"pools\":[{\"name\":\"default\",\"servers\":[{\"url\":\"guard://$G/$APP\"}]}]}"
 ```
