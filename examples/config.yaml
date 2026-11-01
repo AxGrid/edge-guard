@@ -1,0 +1,72 @@
+# edge-guard config. Changes are applied without a restart (the file is
+# watched; `kill -HUP` works too). A broken file is reported in the log and
+# in the status, and the running config stays. Check before saving:
+#   edge-guard -check -config /etc/edge-guard/config.yaml          # the file
+#   edge-guard -check -online -config /etc/edge-guard/config.yaml  # + every panel
+# Unknown fields are errors: a typo must not turn protection off.
+
+# Where the last node lists are kept (a restart works without the panel).
+# Default: $STATE_DIRECTORY (systemd StateDirectory=), else /var/lib/edge-guard.
+state_dir: /var/lib/edge-guard
+
+# JSON status: apps, node lists, refused requests, the config state and its
+# last error. Keep it on localhost.
+status: 127.0.0.1:9102
+
+# info, or debug to log every refused request (with the remote address).
+log_level: info
+
+# Edge clusters: where the node lists come from.
+clusters:
+  prod:
+    panel: https://panel.example.com
+    # asked directly (with the panel's TLS name) when the panel name does not
+    # answer; nodes added later are learned from the panel by themselves
+    nodes: [203.0.113.10, 203.0.113.20, 203.0.113.30]
+  staging:
+    panel: https://panel.staging.example.com
+    nodes: [198.51.100.10, 198.51.100.20, 198.51.100.30]
+
+# Apps: one per site in the panel. The key is the site's origin-auth secret
+# (panel → Sites → the site → Backend protection → Current secret).
+apps:
+  # Two sites on one port, chosen by the Host header.
+  - name: shop
+    cluster: prod
+    listen: ":8080"
+    hosts: [shop.example.com, "*.shop.example.com"]
+    to: http://127.0.0.1:3000
+    key_env: SHOP_KEY               # from /etc/edge-guard/env (mode 600)
+    # next_key_env: SHOP_NEXT_KEY   # during a secret rotation: both accepted
+    allow: [127.0.0.1]              # always let in, no header needed (monitoring)
+
+  - name: blog
+    cluster: staging
+    listen: ":8080"
+    hosts: [blog.example.com]
+    to: http://127.0.0.1:3001
+    key_file: /etc/edge-guard/blog.key
+
+  # HTTPS towards the edge (the site's pool server is then https://host:8443),
+  # gRPC to the service over h2c.
+  - name: api
+    cluster: prod
+    listen: ":8443"
+    tls: {cert: /etc/edge-guard/tls/api.pem, key: /etc/edge-guard/tls/api.key}
+    to: http://127.0.0.1:9000
+    protocol: h2                    # h1 (default) | auto | h2 (gRPC)
+    key_env: API_KEY
+
+  # TCP: only the source address is checked (no headers in TCP).
+  - name: postgres
+    cluster: prod
+    listen: ":5432"
+    to: tcp://127.0.0.1:5433
+    key_env: SHOP_KEY               # any key of the cluster: used to get the list
+
+# Other app fields:
+#   header_check: false   accept requests from the nodes without the
+#                         origin-auth header (weaker: another site on the same
+#                         edge comes from the same addresses)
+#   insecure: true        do not verify the certificate of an https:// service
+#   host_header: x        Host sent to the service (default: as the edge sent it)
