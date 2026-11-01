@@ -129,8 +129,69 @@ previous one; the error is in the guard's log):
 - **No flood of requests:** at most 120 requests a minute from one source address to `/api/guard/*`. A
   normal guard makes one a minute per cluster.
 
-Ask whether a guard already exists in the panel. If not, the user creates one on the Guards page; Claude
-cannot create it, because creating it needs a panel login. Then go to step 3.
+#### Creating the guard (and its key)
+
+Ask with `AskUserQuestion` how the guard gets created. Recommend A when the user has, or can make, a
+panel API token.
+
+**A · Claude creates it through the panel API.**
+1. The user makes a personal API token in the panel: user menu → **«API-токены» → «Создать»**:
+   - scope **`write`**;
+   - expiry **30 days** (or less);
+   - the name, for example `edge-guard setup`.
+
+   They put it into the shell where Claude works, never into the chat:
+   ```sh
+   read -rs EDGE_PANEL_TOKEN && export EDGE_PANEL_TOKEN     # paste, Enter
+   ```
+   The user can type it with the `!` prefix in Claude Code, so it lands in that shell. On a remote
+   server, export it in the SSH session that Claude uses.
+2. Claude creates the guard. The name is a slug and cannot be changed later. Suggest the server's short
+   hostname, e.g. `app-1`:
+   ```sh
+   P=https://panel.example.com; G=app-1
+   curl -sS --fail-with-body -X POST "$P/api/guards" -H "Authorization: Bearer $EDGE_PANEL_TOKEN" \
+     -H 'Content-Type: application/json' -d "{\"name\":\"$G\",\"description\":\"$(hostname)\"}" >/dev/null \
+     || echo "exists or failed — check: curl -s -H \"Authorization: Bearer \$EDGE_PANEL_TOKEN\" $P/api/guards/$G"
+   ```
+   **409 "already exists":** if it is this server's guard (the user confirms), reuse it and only make a
+   new key. If it belongs to another server, pick another name.
+3. Claude makes the guard's key and writes it straight into the env file. The key is never printed: it
+   is shown only once, and only the file keeps it:
+   ```sh
+   sudo install -d -m 750 -g edge-guard /etc/edge-guard 2>/dev/null || sudo install -d -m 750 /etc/edge-guard
+   sudo install -m 600 /dev/null /etc/edge-guard/env.new
+   curl -sS --fail-with-body -X POST "$P/api/guards/$G/tokens" -H "Authorization: Bearer $EDGE_PANEL_TOKEN" \
+     -H 'Content-Type: application/json' -d "{\"label\":\"$(hostname)\"}" \
+     | python3 -c 'import json,sys; print("EDGE_GUARD_KEY="+json.load(sys.stdin)["token"])' \
+     | sudo tee /etc/edge-guard/env.new >/dev/null
+   sudo grep -q '^EDGE_GUARD_KEY=edgg\.' /etc/edge-guard/env.new && sudo mv /etc/edge-guard/env.new /etc/edge-guard/env
+   ```
+   If `/etc/edge-guard/env` already holds other variables (site keys), append the line instead of
+   replacing the file. Check without printing the value: `sudo grep -c '^EDGE_GUARD_KEY=' /etc/edge-guard/env`.
+4. Continue with steps 3–6 (IP, config, install, start). After the guard registers, it is visible at:
+   ```sh
+   curl -s -H "Authorization: Bearer $EDGE_PANEL_TOKEN" "$P/api/guards/$G" \
+     | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["status"]["online"], [a["name"] for a in d["guard"]["apps"]])'
+   ```
+5. Binding domains can be done by Claude as well (step 7, "Binding a domain through the API"), or by the
+   user in the panel.
+6. At the end, tell the user to revoke the API token if it is not needed any more: «API-токены» →
+   revoke, or let it expire.
+
+The token acts as the user, with their permissions:
+- a staff user can create guards, but their guard may report only addresses in their allowed networks;
+- an admin's token can do everything.
+
+Never print or log `EDGE_PANEL_TOKEN` or the guard key.
+
+**B · The user creates it in the panel** (no API token): **Guards → «Добавить guard»** → a name → the
+wizard shows the key once with a ready setup (config, install, systemd) and waits for the connection.
+Ask the user to put the key into `/etc/edge-guard/env` themselves (`EDGE_GUARD_KEY=edgg.…`, mode 600), not
+into the chat. Then continue with step 3.
+
+**A guard that already exists:** a new key on its page (**«Ключи» → «Создать»**) or by API step 3. Old keys
+keep working until revoked.
 
 **A site key** (only when the site already exists and the user prefers it): the rest of this step.
 
@@ -394,6 +455,30 @@ http.Serve(ln, g.Handler(mux))
 addresses, or to a separate IP:port. Never exempt URL paths.
 
 ### 7 · Panel and verification
+
+**Binding a domain through the API** (guard mode, with the API token from creation A). This is what the
+«Привязать домен» wizard does:
+
+```sh
+P=https://panel.example.com; G=app-1; APP=shop; SITE=shop; HOST=shop.example.com
+# the site: domain, Let's Encrypt, redirect to HTTPS, the pool → the guard's app
+# (to run it only on some nodes, add "nodes":["eu1","za1"])
+curl -sS --fail-with-body -X POST "$P/api/sites" -H "Authorization: Bearer $EDGE_PANEL_TOKEN" -H 'Content-Type: application/json' \
+  -d "{\"name\":\"$SITE\",\"hosts\":[\"$HOST\"],\"tls\":{\"acme\":true},\"redirect_https\":true,
+       \"pools\":[{\"name\":\"default\",\"servers\":[{\"url\":\"guard://$G/$APP\"}]}]}"
+```
+
+**DNS:**
+- **The domain's zone is in the panel:** add a proxied record. `GET /api/dns/zones/<zone>` returns
+  `version` and `zone`. Append `{"name":"<label or @>","type":"A","value":"","proxied":true}` to
+  `zone.records`, and `PUT` the zone back with the header `If-Match: <version>`.
+- **Otherwise:** tell the user the A records to set at their DNS host. The node IPs come from the
+  cluster's `nodes`, or from `GET /api/dns/edge-ips`.
+
+Let's Encrypt issues the certificate on the first HTTPS request once DNS points at the nodes.
+
+**Errors (400)** carry `problems[]` with the field. For example, `pools[0].servers[0].url: guard … has not
+reported any http app yet` means the guard is not running yet.
 
 Tell the user what to do in the panel, and run the checks you can:
 
