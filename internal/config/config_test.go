@@ -247,3 +247,41 @@ apps:
 		t.Errorf("files in guard mode: %v", err)
 	}
 }
+
+// Client mode: opt-in, needs the guard key, apps without listen; http only.
+func TestClientMode(t *testing.T) {
+	getenv := func(k string) string {
+		return map[string]string{"G": "edgg.app-1.3fa2c1d0.0123456789abcdef0123456789abcdef"}[k]
+	}
+	in := `
+clusters:
+  prod: {panel: https://p.example, guard_key_env: G, client: true}
+apps:
+  - {name: nas, to: "http://127.0.0.1:3000"}
+`
+	r, err := Parse([]byte(in), "x.yaml", getenv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a := r.Apps[0]; !a.Client || !a.GuardMode || len(a.Listen) != 0 || a.TLS != nil {
+		t.Fatalf("%+v", a)
+	}
+	if addrs, _ := r.Listens(); len(addrs) != 0 {
+		t.Errorf("client mode listens: %v", addrs)
+	}
+	bad := map[string]string{
+		strings.Replace(in, "guard_key_env: G, ", "", 1):                                                                 "client mode needs the guard key",
+		strings.Replace(in, `to: "http://127.0.0.1:3000"}`, `to: "http://127.0.0.1:3000", listen: "192.0.2.1:8443"}`, 1): "leave listen and public out",
+		strings.Replace(in, `to: "http://127.0.0.1:3000"}`, `to: "tcp://127.0.0.1:3000"}`, 1):                            "client mode serves http apps only",
+	}
+	for cfg, want := range bad {
+		if _, err := Parse([]byte(cfg), "x.yaml", getenv); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("want %q, got %v", want, err)
+		}
+	}
+	// without client: the normal guard mode, listen required
+	normal := strings.Replace(in, ", client: true", "", 1)
+	if _, err := Parse([]byte(normal), "x.yaml", getenv); err == nil || !strings.Contains(err.Error(), "listen: required") {
+		t.Errorf("normal mode without listen: %v", err)
+	}
+}

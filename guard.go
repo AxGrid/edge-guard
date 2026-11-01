@@ -67,6 +67,9 @@ type Config struct {
 	Apps []App
 	// Hostname and Version are reported in guard mode.
 	Hostname, Version string
+	// Client: guard mode where this server connects to the nodes itself
+	// (the caller runs the connections); no cluster TLS listener is needed.
+	Client bool
 	// NextKey is accepted in the header too while the secret is rotated.
 	NextKey string
 	// Allow are extra addresses or prefixes always let in (127.0.0.1,
@@ -137,7 +140,7 @@ func New(ctx context.Context, cfg Config) (*Guard, error) {
 		if !strings.HasPrefix(cfg.GuardKey, "edgg.") {
 			return nil, errors.New("guard: GuardKey is a key from the panel's Guards page (edgg.…)")
 		}
-		cfg.ClusterTLS, cfg.NoHeaderCheck, cfg.Key = true, true, ""
+		cfg.ClusterTLS, cfg.NoHeaderCheck, cfg.Key = !cfg.Client, true, ""
 	} else if len(cfg.Key) < 24 {
 		return nil, errors.New("guard: Key must be the site's origin-auth secret (24+ characters)")
 	}
@@ -328,6 +331,8 @@ type App struct {
 	Kind   string   `json:"kind"`   // http | tcp
 	Listen []string `json:"listen"` // the addresses the nodes connect to
 	Hosts  []string `json:"hosts"`  // suggested domains
+	// Via "tunnel": client mode, through the guard's own connections.
+	Via string `json:"via,omitempty"`
 }
 
 func (g *Guard) key() string {

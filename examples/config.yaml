@@ -25,6 +25,11 @@ clusters:
     # and domains are bound to them there ("Bind a domain"). Comment it out
     # to use per-site keys (key_env on each app) instead.
     # guard_key_env: EDGE_GUARD_KEY
+    # Client mode (opt-in, guard mode only): the guard connects to the nodes
+    # itself — no open ports, works behind NAT; the apps then have no listen.
+    # client: true
+    # A private CA of the panel and the nodes (default: system roots).
+    # ca_file: /etc/edge-guard/edge-ca.pem
     # asked directly (with the panel's TLS name) when the panel name does not
     # answer; nodes added later are learned from the panel by themselves
     nodes: [203.0.113.10, 203.0.113.20, 203.0.113.30]

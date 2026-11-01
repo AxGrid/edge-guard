@@ -86,6 +86,37 @@ In this mode:
 - the node names the app in `X-Edge-Guard-App`, so apps can share one address without `hosts`;
 - `public:` sets the address reported for an app when the server is behind NAT.
 
+**Client mode (opt-in): no open ports, works behind NAT.** By default the nodes connect to the guard.
+With `client: true` on a guard-mode cluster, the guard connects to the nodes itself instead:
+- it keeps one TLS connection per node, on port 443, authenticated with its guard key;
+- the nodes send the apps' requests through those connections;
+- the apps have no `listen`, and the server needs no open port and no public address.
+
+```yaml
+clusters:
+  prod:
+    panel: https://panel.example.com
+    nodes: [203.0.113.10, 203.0.113.20]
+    guard_key_env: EDGE_GUARD_KEY
+    client: true                 # opt-in; without it the guard listens as usual
+apps:
+  - {name: nas, to: http://127.0.0.1:5000, hosts: [nas.example.com]}
+```
+
+Binding domains works the same: `guard://<guard>/<app>`. The guard page in the panel shows "client mode:
+connected to N nodes". If the panel's name does not answer, the guard connects through the `nodes`
+addresses with the panel's TLS name.
+
+One connection per node carries any number of requests at once. Every request is its own stream with its
+own flow control (a window of up to 2 MB, so one long response is not slowed by others), and WebSocket and
+large uploads and downloads work. Locally, one connection carried 50 MB at about 1 GB/s and 200 parallel
+requests. Limits:
+- all requests to a node share one TCP connection, so packet loss on a bad link slows them all at once;
+- with only a few streams, very high bandwidth over long distances is limited by the TCP window.
+
+HTTP apps only for now. Needs edge-guard v0.4.0 or later and an edge that accepts guard keys on its
+tunnel listener.
+
 **A site's key:** the site already exists in the panel, and the guard uses its origin-auth secret
 (`key_env` on each app). This is the setup described in the rest of this README.
 
@@ -184,6 +215,8 @@ The full reference with comments is in [`examples/config.yaml`](examples/config.
 |---|---|
 | `state_dir`, `status`, `log_level` | As in the example above. |
 | `clusters.<name>.panel` / `.nodes` | Where the lists come from. At least one of the two. |
+| `clusters.<name>.client` | Client mode (needs the guard key): the guard connects to the nodes itself; apps have no `listen`. Off by default. |
+| `clusters.<name>.ca_file` | PEM of a private CA the panel and the nodes use (default: the system roots). |
 | `clusters.<name>.guard_key_env` / `guard_key_file` / `guard_key` | Guard mode: the key from the panel's Guards page. Apps of this cluster without a key of their own are then reported to the panel. |
 
 **App fields:**

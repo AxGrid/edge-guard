@@ -104,6 +104,27 @@ curl -s -o /dev/null -w '%{http_code}\n' -H 'Authorization: Bearer x' https://<p
    with which nodes serve it, Let's Encrypt and the DNS record, and the pool server
    `guard://<guard>/<app>`.
 
+**Client mode** is opt-in for guard mode, and **off by default**. Never turn it on by yourself.
+- **What it does:** the cluster gets `client: true`, and the guard connects to the nodes itself. It keeps
+  one TLS connection per node on 443, authenticated with its guard key, and the nodes send the requests
+  through it.
+- **What changes:** the apps have **no `listen`/`public`**, and the server needs no open port and no public
+  address.
+- **Offer it** when the server is behind NAT, has no public address, or must not open ports. Say that it
+  is a choice, and that the default (the nodes connect to the guard) needs an open port on the server's IP.
+- **Limits:** only HTTP apps for now (no TCP). Needs edge-guard **v0.4.0+** and an edge that accepts guard
+  keys on its tunnel listener (edge from 2026-11).
+- **What one connection per node handles:**
+  - any number of parallel requests: each is its own stream with its own flow control, up to 2 MB in
+    flight per stream;
+  - WebSocket and large files.
+
+  Packet loss on a bad link slows all requests to that node at once, because they share one TCP
+  connection.
+- **Status:** the guard page in the panel shows «Режим клиента: подключён к нодам: …»; the guard's
+  status shows `via: tunnel` and the nodes.
+- **`ca_file:`** on the cluster, for a panel or nodes with a private CA.
+
 What changes in guard mode:
 - **TLS:** cluster TLS is implied, so no `tls:` is needed.
 - **Trust:** nodes are trusted by their client certificate, so no origin-auth header.
@@ -111,7 +132,7 @@ What changes in guard mode:
 - **`hosts`:** only suggestions for the wizard.
 - **Behind NAT:** `public: <ip:port>` per app reports the address the nodes reach.
 
-Guard mode needs edge-guard **v0.3.0 or later** (`edge-guard -version`) and an edge that serves
+Guard mode needs edge-guard **v0.3.0 or later** (client mode **v0.4.0+**) (`edge-guard -version`) and an edge that serves
 `POST /api/guard/register`. `-check -online` already registers the apps, so the guard shows up in the
 panel before the service is started.
 
@@ -338,6 +359,26 @@ apps:
 
 Then tell the user to bind domains in the panel: Guards → the guard → app → «Привязать домен».
 
+Client mode (only when the user chose it):
+
+```yaml
+clusters:
+  prod:
+    panel: https://panel.example.com
+    nodes: [203.0.113.10, 203.0.113.20, 203.0.113.30]
+    guard_key_env: EDGE_GUARD_KEY
+    client: true                       # opt-in: the guard connects to the nodes, no open ports
+apps:
+  - name: nas
+    cluster: prod
+    to: http://127.0.0.1:5000          # no listen in client mode
+    hosts: [nas.example.com]
+```
+
+Step 3 (the IP to listen on) is skipped in client mode: there is nothing to listen on. Check that the
+server can reach the panel and the nodes on 443:
+`curl -s -o /dev/null -w '%{http_code}' https://<panel>/api/ping` should print 200.
+
 Site-key mode:
 
 ```yaml
@@ -547,4 +588,13 @@ Tell the user what to do in the panel, and run the checks you can:
   and stop whatever rewrites the config in a loop.
 - **"too many requests" (HTTP 429)** on `/api/guard/*`: more than 120 a minute from this address, for
   example many guards behind one NAT address restarting at once. It clears within a minute.
+- **Client mode:**
+  - **"client mode needs the guard key":** `client: true` without `guard_key_env`.
+  - **"leave listen and public out":** an app still has `listen`.
+  - **No connection to the nodes:**
+    - outbound 443 from the server is blocked, or the panel name does not resolve. Set `nodes:`, and the
+      guard connects through them with the panel's TLS name;
+    - `tunnel: the edge rejected the token`: the key was revoked.
+  - **The panel shows «нет соединения с нодами»:** look at `journalctl -u edge-guard` for
+    `tunnel connected` / `node connected`.
 - **Behind an edge tunnel (`tunnel://name`)** you don't need the guard: the server has no open port.

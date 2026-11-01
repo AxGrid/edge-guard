@@ -4,6 +4,7 @@ package config
 import (
 	"bytes"
 	"crypto/sha256"
+	"crypto/x509"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -48,6 +49,14 @@ type Cluster struct {
 	GuardKey     string `yaml:"guard_key"`
 	GuardKeyEnv  string `yaml:"guard_key_env"`
 	GuardKeyFile string `yaml:"guard_key_file"`
+	// Client mode (opt-in, needs the guard key): the guard connects to the
+	// nodes itself and keeps one connection per node; the nodes send the
+	// apps' requests through it. No open ports, works behind NAT. The apps
+	// of this cluster then have no listen.
+	Client bool `yaml:"client"`
+	// CAFile: PEM of a private CA the panel and the nodes use (default: the
+	// system roots).
+	CAFile string `yaml:"ca_file"`
 }
 
 // App is one protected service.
@@ -127,6 +136,9 @@ type ResolvedApp struct {
 	GuardKey  string
 	// Report: the addresses reported in guard mode (public, else listen).
 	Report []string
+	// Client: the cluster is in client mode (no listen; through the guard's
+	// own connections to the nodes).
+	Client bool
 }
 
 // Problems is every error found in a config.
@@ -251,6 +263,19 @@ func Parse(b []byte, path string, getenv func(string) string) (*Resolved, error)
 		}
 		h.Write([]byte(gk + "\x00"))
 		guardKeys[n] = gk
+		if cl.Client && gsrc == 0 {
+			add("clusters.%s.client: client mode needs the guard key (guard_key_env from the panel's Guards page)", n)
+		}
+		if cl.CAFile != "" {
+			r.Files = append(r.Files, cl.CAFile)
+			if b, err := os.ReadFile(cl.CAFile); err != nil {
+				add("clusters.%s.ca_file: %v", n, err)
+			} else if !x509.NewCertPool().AppendCertsFromPEM(b) {
+				add("clusters.%s.ca_file: no PEM certificates in %s", n, cl.CAFile)
+			} else {
+				h.Write(b)
+			}
+		}
 	}
 	if len(c.Apps) == 0 {
 		add("apps: at least one app is required")
@@ -312,8 +337,23 @@ func Parse(b []byte, path string, getenv func(string) string) (*Resolved, error)
 		default:
 			add("%s.protocol: h1, auto or h2, not %q", f, a.Protocol)
 		}
+		// client mode: no listen, the guard's own connections to the nodes
+		clientMode := c.Clusters[ra.Cluster].Client
+		if clientMode {
+			ra.Client = true
+			switch {
+			case len(a.Listen) > 0 || len(a.Public) > 0:
+				add("%s.listen: the cluster is in client mode (client: true): the nodes reach the app through the guard's own connections, leave listen and public out", f)
+			case ra.Kind == "tcp":
+				add("%s.to: client mode serves http apps only (TCP later)", f)
+			case a.TLS != nil:
+				add("%s.tls: client mode needs no tls (the connections to the nodes are TLS)", f)
+			case a.Key != "" || a.KeyEnv != "" || a.KeyFile != "":
+				add("%s: client mode uses the cluster's guard key: leave key_env, key_file, key out", f)
+			}
+		}
 		// listen: explicit IPs only
-		if len(a.Listen) == 0 {
+		if len(a.Listen) == 0 && !clientMode {
 			add("%s.listen: required: the server's IP and port the edge connects to, e.g. 203.0.113.5:8080", f)
 		}
 		var addrs []string
@@ -346,6 +386,7 @@ func Parse(b []byte, path string, getenv func(string) string) (*Resolved, error)
 			// guard mode: the cluster's guard key, cluster TLS, nodes by certificate
 			ra.GuardMode, ra.GuardKey = true, gk
 			switch {
+			case ra.Client:
 			case ra.Kind == "http" && a.TLS == nil:
 				ra.TLS = &TLS{Cluster: true}
 			case ra.Kind == "http" && !a.TLS.Cluster:

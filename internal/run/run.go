@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -16,6 +17,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httputil"
+	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
@@ -26,6 +28,7 @@ import (
 
 	guard "github.com/axgrid/edge-guard"
 	"github.com/axgrid/edge-guard/internal/config"
+	"github.com/axgrid/edge-guard/internal/tunnel"
 )
 
 // Manager runs one config at a time.
@@ -52,7 +55,8 @@ type guardEntry struct {
 	g      *guard.Guard
 	cancel context.CancelFunc
 	used   bool
-	report string // guard mode: the apps last reported (JSON)
+	client *clientConn // client mode
+	report string      // guard mode: the apps last reported (JSON)
 }
 
 func (e *guardEntry) setReport(apps []guard.App) {
@@ -69,6 +73,85 @@ type app struct {
 	cfg     config.ResolvedApp
 	g       *guard.Guard
 	handler http.Handler
+	client  *clientConn // client mode: served through these connections
+}
+
+// clientConn is client mode for one cluster: connections to every node
+// (the tunnel protocol, the guard key) and an HTTP server on them that
+// routes by the app the node names.
+type clientConn struct {
+	ln     *tunnel.Listener
+	srv    *http.Server
+	routes atomic.Pointer[map[string]*app]
+}
+
+// startClient connects to the nodes: the panel's name first, then the
+// configured nodes with the panel's TLS name.
+func (m *Manager) startClient(ctx context.Context, a config.ResolvedApp) (*clientConn, error) {
+	u, err := url.Parse(a.ClusterDef.Panel)
+	if err != nil || u.Hostname() == "" {
+		return nil, fmt.Errorf("client mode needs the panel URL (https://…)")
+	}
+	port := u.Port()
+	if port == "" || u.Scheme != "https" {
+		port = "443"
+	}
+	tc := &tls.Config{ServerName: u.Hostname()}
+	if a.ClusterDef.CAFile != "" {
+		tc.RootCAs = caPool(a.ClusterDef.CAFile)
+	}
+	hostname, _ := os.Hostname()
+	targets := []string{net.JoinHostPort(u.Hostname(), port)}
+	for _, n := range a.ClusterDef.Nodes {
+		if _, _, err := net.SplitHostPort(n); err == nil {
+			targets = append(targets, n)
+		} else {
+			targets = append(targets, net.JoinHostPort(strings.Trim(n, "[]"), port))
+		}
+	}
+	var errs []error
+	for _, t := range targets {
+		ln, err := tunnel.Listen(ctx, tunnel.Config{Edge: t, Token: a.GuardKey, Instance: hostname + "/" + a.Cluster, Version: m.Version,
+			TLSConfig: tc, Logger: m.Log.With("guard", a.Cluster, "client", true)})
+		if err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", t, err))
+			if errors.Is(err, tunnel.ErrUnauthorized) {
+				break // the key is wrong everywhere
+			}
+			continue
+		}
+		c := &clientConn{ln: ln}
+		empty := map[string]*app{}
+		c.routes.Store(&empty)
+		p := new(http.Protocols)
+		p.SetHTTP1(true)
+		c.srv = &http.Server{ReadHeaderTimeout: 30 * time.Second, Protocols: p, ErrorLog: slog.NewLogLogger(m.Log.Handler(), slog.LevelDebug),
+			Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				// only nodes open streams on these connections: the app they name is trusted
+				name := r.Header.Get(guardAppHeader)
+				r.Header.Del(guardAppHeader)
+				if ap := (*c.routes.Load())[name]; ap != nil {
+					ap.handler.ServeHTTP(w, r)
+					return
+				}
+				m.unknown.Add(1)
+				m.Log.Warn("client mode: the node asked for an app that this guard does not serve", "app", name)
+				http.Error(w, "Forbidden", http.StatusForbidden)
+			})}
+		go func() { _ = c.srv.Serve(ln) }()
+		go func() { <-ctx.Done(); _ = c.srv.Close(); _ = ln.Close() }()
+		m.Log.Info("client mode: connected to the nodes", "cluster", a.Cluster, "via", t)
+		return c, nil
+	}
+	return nil, errors.Join(errs...)
+}
+
+func caPool(file string) *x509.CertPool {
+	pool := x509.NewCertPool()
+	if b, err := os.ReadFile(file); err == nil {
+		pool.AppendCertsFromPEM(b)
+	}
+	return pool
 }
 
 // guardAppHeader names the app in requests from a node (guard mode).
@@ -131,7 +214,11 @@ func (m *Manager) Apply(ctx context.Context, r *config.Resolved) error {
 	reports := map[string][]guard.App{}
 	for _, a := range r.Apps {
 		if a.GuardMode {
-			reports[guardID(a)] = append(reports[guardID(a)], guard.App{Name: a.Name, Kind: a.Kind, Listen: a.Report, Hosts: append([]string{}, a.Hosts...)})
+			ga := guard.App{Name: a.Name, Kind: a.Kind, Listen: a.Report, Hosts: append([]string{}, a.Hosts...)}
+			if a.Client {
+				ga.Listen, ga.Via = []string{}, "tunnel"
+			}
+			reports[guardID(a)] = append(reports[guardID(a)], ga)
 		}
 	}
 	hostname, _ := os.Hostname()
@@ -153,8 +240,11 @@ func (m *Manager) Apply(ctx context.Context, r *config.Resolved) error {
 			}
 			if a.GuardMode {
 				gc.Key, gc.NextKey, gc.Allow = "", "", nil
-				gc.GuardKey, gc.Apps, gc.Hostname, gc.Version = a.GuardKey, reports[id], hostname, m.Version
+				gc.GuardKey, gc.Apps, gc.Hostname, gc.Version, gc.Client = a.GuardKey, reports[id], hostname, m.Version, a.Client
 				gc.Log = m.Log.With("guard", a.Cluster)
+			}
+			if a.ClusterDef.CAFile != "" {
+				gc.HTTPClient = &http.Client{Timeout: 10 * time.Second, Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: caPool(a.ClusterDef.CAFile)}}}
 			}
 			g, err := guard.New(gctx, gc)
 			if err != nil {
@@ -164,15 +254,41 @@ func (m *Manager) Apply(ctx context.Context, r *config.Resolved) error {
 			}
 			e = &guardEntry{g: g, cancel: cancel}
 			e.setReport(reports[id])
+			if a.Client {
+				// client mode: the guard's own connections to the nodes
+				ct, err := m.startClient(gctx, a)
+				if err != nil {
+					cancel()
+					undo()
+					return fmt.Errorf("cluster %s (client mode): %w", a.Cluster, err)
+				}
+				e.client = ct
+			}
 			m.guards[id] = e
 			fresh = append(fresh, id)
 		}
 		e.used = true
-		ap := &app{cfg: a, g: e.g}
-		if a.Kind == "http" {
+		ap := &app{cfg: a, g: e.g, client: e.client}
+		switch {
+		case a.Client:
+			ap.handler = m.proxy(a) // the connection itself is the node's: no address check
+		case a.Kind == "http":
 			ap.handler = e.g.Handler(m.proxy(a))
 		}
 		apps = append(apps, ap)
+	}
+	// client mode: the apps each connection routes to
+	for _, e := range m.guards {
+		if e.client == nil {
+			continue
+		}
+		rt := map[string]*app{}
+		for _, ap := range apps {
+			if ap.client == e.client {
+				rt[ap.cfg.Name] = ap
+			}
+		}
+		e.client.routes.Store(&rt)
 	}
 
 	// 2. listeners: open the new addresses first, so a busy port fails the
@@ -575,6 +691,9 @@ type AppStatus struct {
 	Hosts   []string `json:"hosts,omitempty"`
 	To      string   `json:"to"`
 	Cluster string   `json:"cluster"`
+	// Client mode: the nodes this guard is connected to.
+	Via   string             `json:"via,omitempty"`
+	Nodes []tunnel.NodeState `json:"nodes,omitempty"`
 	guard.Status
 }
 
@@ -604,7 +723,11 @@ func (m *Manager) Status() Status {
 	}
 	st.Apps = []AppStatus{}
 	for _, ap := range m.apps {
-		st.Apps = append(st.Apps, AppStatus{Name: ap.cfg.Name, Listen: ap.cfg.Listen, Hosts: ap.cfg.Hosts, To: ap.cfg.To, Cluster: ap.cfg.Cluster, Status: ap.g.Status()})
+		as := AppStatus{Name: ap.cfg.Name, Listen: ap.cfg.Listen, Hosts: ap.cfg.Hosts, To: ap.cfg.To, Cluster: ap.cfg.Cluster, Status: ap.g.Status()}
+		if ap.client != nil {
+			as.Via, as.Nodes = "tunnel", ap.client.ln.Nodes()
+		}
+		st.Apps = append(st.Apps, as)
 	}
 	st.UnknownHost = m.unknown.Load()
 	return st

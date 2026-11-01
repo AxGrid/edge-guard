@@ -21,10 +21,13 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"flag"
 	"fmt"
 	"log/slog"
 	"net"
+	"net/http"
 	"net/netip"
 	"os"
 	"os/signal"
@@ -176,7 +179,10 @@ func checkOnly(r *config.Resolved, online bool) int {
 			hosts = " hosts=" + strings.Join(a.Hosts, ",")
 		}
 		mode := ""
-		if a.GuardMode {
+		switch {
+		case a.Client:
+			mode = " guard-mode client-mode"
+		case a.GuardMode:
 			mode = " guard-mode"
 		}
 		line := fmt.Sprintf("  %-16s %-8s %s → %s cluster=%s%s%s", a.Name, a.Kind, strings.Join(a.Listen, ","), a.To, a.Cluster, hosts, mode)
@@ -186,11 +192,22 @@ func checkOnly(r *config.Resolved, online bool) int {
 			if a.GuardMode {
 				// registers all apps of the cluster, as the running guard does
 				hostname, _ := os.Hostname()
-				gc.Key, gc.GuardKey, gc.Hostname, gc.Version = "", a.GuardKey, hostname, version
+				gc.Key, gc.GuardKey, gc.Hostname, gc.Version, gc.Client = "", a.GuardKey, hostname, version, a.Client
 				for _, b := range r.Apps {
 					if b.GuardMode && b.Cluster == a.Cluster {
-						gc.Apps = append(gc.Apps, guard.App{Name: b.Name, Kind: b.Kind, Listen: b.Report, Hosts: append([]string{}, b.Hosts...)})
+						ga := guard.App{Name: b.Name, Kind: b.Kind, Listen: b.Report, Hosts: append([]string{}, b.Hosts...)}
+						if b.Client {
+							ga.Listen, ga.Via = []string{}, "tunnel"
+						}
+						gc.Apps = append(gc.Apps, ga)
 					}
+				}
+				if a.ClusterDef.CAFile != "" {
+					pool := x509.NewCertPool()
+					if b, err := os.ReadFile(a.ClusterDef.CAFile); err == nil {
+						pool.AppendCertsFromPEM(b)
+					}
+					gc.HTTPClient = &http.Client{Timeout: 10 * time.Second, Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: pool}}}
 				}
 			}
 			g, err := guard.New(ctx, gc)
