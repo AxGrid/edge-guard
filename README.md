@@ -25,6 +25,9 @@ library. The library uses only the standard library.
     TLS name.
   - The last list is kept on disk, so a restart works while the panel is unreachable.
   - A failed refresh keeps the last list; it is never emptied.
+- **Explicit bind.** A guard listens only on the IP addresses you name (`198.51.100.5:8080`, or a list),
+  never on every address of a server by accident: `:8080` and `0.0.0.0` are refused unless `bind_any:
+  true`. This matters on servers with many addresses.
 - **Several clusters, apps and hosts** in one config file:
   - several HTTP apps can share a port and are chosen by `Host`, including `*.example.com`;
   - TCP apps are checked by source address only.
@@ -67,11 +70,12 @@ Other ways:
 ```sh
 EDGE_GUARD_KEY='<origin-auth secret>' edge-guard \
   -panel https://panel.example.com -nodes 203.0.113.10,203.0.113.20 \
-  -listen :8080 -to http://127.0.0.1:3000
+  -listen 198.51.100.5:8080 -to http://127.0.0.1:3000
 ```
 
-Make the service itself listen on `127.0.0.1`, then point the site's pool server in the panel at
-`<this server>:8080`. Run `edge-guard -h` for all flags. They match the config fields below.
+`-listen` takes this server's IP (the one the edge connects to; `ip -4 -o addr show` lists them), several
+comma separated; every address only with `-bind-any`. Make the service itself listen on `127.0.0.1`, then
+point the site's pool server in the panel at exactly `198.51.100.5:8080`. Run `edge-guard -h` for all flags. They match the config fields below.
 
 ### A config file
 
@@ -96,19 +100,19 @@ clusters:
 apps:
   - name: shop
     cluster: prod
-    listen: ":8080"
-    hosts: [shop.example.com, "*.shop.example.com"]   # several apps share :8080 by Host
+    listen: 198.51.100.5:8080        # this server's IP the edge connects to (or a list)
+    hosts: [shop.example.com, "*.shop.example.com"]   # several apps share it by Host
     to: http://127.0.0.1:3000
     key_env: SHOP_KEY                # or key_file: /etc/edge-guard/shop.key
   - name: blog
     cluster: staging
-    listen: ":8080"
+    listen: 198.51.100.5:8080
     hosts: [blog.example.com]
     to: http://127.0.0.1:3001
     key_env: BLOG_KEY
   - name: db                         # TCP: address check only
     cluster: prod
-    listen: ":5432"
+    listen: 198.51.100.5:5432
     to: tcp://127.0.0.1:5433
     key_env: SHOP_KEY
 ```
@@ -128,7 +132,8 @@ The full reference with comments is in [`examples/config.yaml`](examples/config.
 |---|---|
 | `name` | Required and unique. |
 | `cluster` | May be left out when there is one cluster. |
-| `listen` | `:8080`, `127.0.0.1:8080`, `[::]:443`. |
+| `listen` | This server's IP and port, e.g. `198.51.100.5:8080` or `[2001:db8::5]:443`; a list for several addresses. No host names. `:8080`, `0.0.0.0:…` and `[::]:…` (every address) only with `bind_any: true`. `-check` warns about an IP that is not on the machine. |
+| `bind_any` | Allow `listen` on every address of the server. |
 | `hosts` | Exact names or `*.example.com`. Needed when apps share `listen`; one app per address may have none (the default). An unknown host gets 403. |
 | `to` | `http://`, `https://` or `tcp://host:port`. |
 | `key_env` / `key_file` / `key` | The site's origin-auth secret. Use exactly one; prefer `key_env`. |
@@ -159,7 +164,7 @@ The full reference with comments is in [`examples/config.yaml`](examples/config.
 ```json
 { "version": "v1.0.0",
   "config": { "file": "/etc/edge-guard/config.yaml", "loaded_at": "…", "hash": "3f2a…", "error": "" },
-  "apps": [ { "name": "shop", "listen": ":8080", "to": "http://127.0.0.1:3000", "cluster": "prod",
+  "apps": [ { "name": "shop", "listen": ["198.51.100.5:8080"], "to": "http://127.0.0.1:3000", "cluster": "prod",
               "site": "shop", "ips": ["203.0.113.10", "203.0.113.20"], "fetched_at": "…",
               "denied": 12, "last_error": "" } ],
   "unknown_host": 0 }
@@ -205,7 +210,7 @@ g, err := guard.New(ctx, guard.Config{
 if err != nil {
 	log.Fatal(err) // no panel and no cached list: do not start open
 }
-srv := &http.Server{Addr: ":8080", Handler: g.Handler(mux)} // 403 Forbidden to others; the header is removed
+srv := &http.Server{Addr: "198.51.100.5:8080", Handler: g.Handler(mux)} // the IP the edge connects to; 403 Forbidden to others
 ```
 
 | API | |
@@ -217,6 +222,21 @@ srv := &http.Server{Addr: ":8080", Handler: g.Handler(mux)} // 403 Forbidden to 
 | `g.ClientIP(r)` | The visitor's address (`X-Real-Ip` from a node, else the peer). |
 | `g.Status()` | `site`, `ips`, `fetched_at`, `denied`, `last_error`. |
 | `g.Refresh(ctx)` | Fetch now (it runs every minute by itself until `ctx` ends). |
+
+## Claude Code skill
+
+[`skills/edge-guard/SKILL.md`](skills/edge-guard/SKILL.md) teaches Claude Code to install, configure,
+embed and check edge-guard. It asks for the cluster (panel and node addresses), the key of each app, and
+the IP of the server to listen on. Install it once per machine:
+
+```sh
+mkdir -p ~/.claude/skills/edge-guard && curl -fsSL \
+  https://raw.githubusercontent.com/AxGrid/edge-guard/main/skills/edge-guard/SKILL.md \
+  -o ~/.claude/skills/edge-guard/SKILL.md
+```
+
+Then ask Claude Code, for example, "закрой этот сервис через edge-guard" or "protect this origin with
+edge-guard". You can put your clusters in the skill's table so it offers them.
 
 ## The panel API
 

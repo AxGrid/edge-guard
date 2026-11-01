@@ -221,3 +221,31 @@ func TestWatch(t *testing.T) {
 	}
 	t.Fatal("the change was not picked up")
 }
+
+// One app on two explicit addresses answers on both.
+func TestTwoAddresses(t *testing.T) {
+	t.Setenv("K", key)
+	p := panel(t)
+	a := service(t, "a")
+	l1, l2 := freePort(t), freePort(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	write(t, path, fmt.Sprintf("state_dir: %s\nclusters: {edge: {panel: %s}}\napps:\n  - {name: a, listen: [%q, %q], to: %q, key_env: K}\n", dir, p.URL, l1, l2, a))
+	m := &Manager{Path: path, Log: slog.New(slog.DiscardHandler)}
+	r, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Apply(t.Context(), r); err != nil {
+		t.Fatal(err)
+	}
+	defer m.Close()
+	for _, addr := range []string{l1, l2} {
+		if code, body := get(t, addr, "x", true); code != 200 || body != "a x" {
+			t.Errorf("%s: %d %q", addr, code, body)
+		}
+	}
+	if st := m.Status(); len(st.Apps) != 1 || len(st.Apps[0].Listen) != 2 {
+		t.Errorf("status %+v", st.Apps)
+	}
+}

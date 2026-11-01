@@ -13,7 +13,10 @@
 // One app from flags:
 //
 //	EDGE_GUARD_KEY=… edge-guard -panel https://panel.example.com \
-//	  -nodes 203.0.113.10,203.0.113.20 -listen :8080 -to http://127.0.0.1:3000
+//	  -nodes 203.0.113.10,203.0.113.20 -listen 198.51.100.5:8080 -to http://127.0.0.1:3000
+//
+// The listen address must name this server's IP (on a server with many
+// addresses only that one is taken); every address only with -bind-any.
 package main
 
 import (
@@ -21,6 +24,8 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net"
+	"net/netip"
 	"os"
 	"os/signal"
 	"strings"
@@ -43,7 +48,8 @@ func main() {
 		online   = flag.Bool("online", false, "with -check: also fetch every app's node list from its panel")
 		panel    = flag.String("panel", "", "one app: edge panel URL, e.g. https://panel.example.com")
 		nodes    = flag.String("nodes", "", "one app: edge node addresses, comma separated")
-		listen   = flag.String("listen", ":8080", "one app: address to listen on")
+		listen   = flag.String("listen", "", "one app: this server's IP and port the edge connects to, e.g. 203.0.113.5:8080 (several: comma separated)")
+		bindAny  = flag.Bool("bind-any", false, "one app: allow -listen on every address of the server (:8080, 0.0.0.0:8080)")
 		to       = flag.String("to", "", "one app: the service, http://host:port, https://host:port or tcp://host:port")
 		keyEnv   = flag.String("key-env", "EDGE_GUARD_KEY", "one app: environment variable with the key (the site's origin-auth secret)")
 		keyFile  = flag.String("key-file", "", "one app: file with the key")
@@ -80,7 +86,7 @@ func main() {
 		}
 		c := config.Config{StateDir: *state, Status: *status, LogLevel: map[bool]string{true: "debug", false: "info"}[*debug],
 			Clusters: map[string]config.Cluster{"edge": {Panel: *panel, Nodes: split(*nodes)}},
-			Apps: []config.App{{Name: "app", Listen: *listen, To: *to, Allow: split(*allow), Insecure: *insecure, Protocol: *proto,
+			Apps: []config.App{{Name: "app", Listen: split(*listen), BindAny: *bindAny, To: *to, Allow: split(*allow), Insecure: *insecure, Protocol: *proto,
 				NextKeyEnv: *nextEnv}}}
 		if *keyFile != "" {
 			c.Apps[0].KeyFile = *keyFile
@@ -98,7 +104,11 @@ func main() {
 		r, err = config.Parse(b, "", os.Getenv)
 	}
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "edge-guard: config %s: %v\n", *cfgPath, err)
+		if *cfgPath != "" {
+			fmt.Fprintf(os.Stderr, "edge-guard: config %s: %v\n", *cfgPath, err)
+		} else {
+			fmt.Fprintf(os.Stderr, "edge-guard: %v\n(flags: -listen IP:port, -to, -panel/-nodes, the key in $%s or -key-file)\n", err, *keyEnv)
+		}
 		os.Exit(1)
 	}
 	if *check {
@@ -132,12 +142,33 @@ func main() {
 func checkOnly(r *config.Resolved, online bool) int {
 	fmt.Printf("config OK: %d cluster(s), %d app(s)\n", len(r.Clusters), len(r.Apps))
 	code := 0
+	// an IP that is not on this server fails at start ("cannot assign requested address")
+	local := map[string]bool{}
+	if addrs, err := net.InterfaceAddrs(); err == nil {
+		for _, a := range addrs {
+			if p, err := netip.ParsePrefix(a.String()); err == nil {
+				local[p.Addr().Unmap().String()] = true
+			}
+		}
+	}
+	warned := map[string]bool{}
+	for _, a := range r.Apps {
+		for _, l := range a.Listen {
+			host, _, _ := net.SplitHostPort(l)
+			ip, err := netip.ParseAddr(host)
+			if err != nil || ip.IsUnspecified() || local[ip.Unmap().String()] || warned[host] {
+				continue
+			}
+			warned[host] = true
+			fmt.Printf("warning: %s is not an address of this machine (listen of %s): it can be used only on the server that has it\n", host, a.Name)
+		}
+	}
 	for _, a := range r.Apps {
 		hosts := ""
 		if len(a.Hosts) > 0 {
 			hosts = " hosts=" + strings.Join(a.Hosts, ",")
 		}
-		line := fmt.Sprintf("  %-16s %-8s %s → %s cluster=%s%s", a.Name, a.Kind, a.Listen, a.To, a.Cluster, hosts)
+		line := fmt.Sprintf("  %-16s %-8s %s → %s cluster=%s%s", a.Name, a.Kind, strings.Join(a.Listen, ","), a.To, a.Cluster, hosts)
 		if online {
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			g, err := guard.New(ctx, guard.Config{Panel: a.ClusterDef.Panel, Nodes: a.ClusterDef.Nodes, Key: a.KeyValue,

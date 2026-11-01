@@ -48,9 +48,14 @@ type App struct {
 	Name string `yaml:"name"`
 	// Cluster name (may be left out when there is one cluster).
 	Cluster string `yaml:"cluster"`
-	// Listen address, e.g. ":8080". Several HTTP apps may share it when they
-	// list their Hosts (one of them may have none: the default).
-	Listen string `yaml:"listen"`
+	// Listen: the server's IP and port, e.g. "203.0.113.5:8080", or a list of
+	// them. The IP is required: on a server with many addresses the guard
+	// must take only the one the edge connects to (all addresses —
+	// 0.0.0.0, [::] — only with bind_any). Several HTTP apps may share an
+	// address when they list their Hosts (one of them may have none: the default).
+	Listen Addrs `yaml:"listen"`
+	// BindAny allows listen on every address of the server (0.0.0.0:port, [::]:port).
+	BindAny bool `yaml:"bind_any"`
 	// Hosts this app answers on a shared listen address (exact or *.example.com).
 	Hosts []string `yaml:"hosts"`
 	// To: http://host:port, https://host:port or tcp://host:port.
@@ -258,10 +263,29 @@ func Parse(b []byte, path string, getenv func(string) string) (*Resolved, error)
 		default:
 			add("%s.protocol: h1, auto or h2, not %q", f, a.Protocol)
 		}
-		// listen
-		if _, _, err := net.SplitHostPort(a.Listen); err != nil {
-			add("%s.listen: %q is not an address like :8080", f, a.Listen)
+		// listen: explicit IPs only
+		if len(a.Listen) == 0 {
+			add("%s.listen: required: the server's IP and port the edge connects to, e.g. 203.0.113.5:8080", f)
 		}
+		var addrs []string
+		for _, l := range a.Listen {
+			n, err := normListen(l)
+			switch {
+			case errors.Is(err, errAnyAddr) && a.BindAny:
+			case errors.Is(err, errAnyAddr):
+				add("%s.listen: %q takes every address of the server; give the IP the edge connects to (e.g. 203.0.113.5:%s), or set bind_any: true", f, l, portOf(l))
+				continue
+			case err != nil:
+				add("%s.listen: %q: %v", f, l, err)
+				continue
+			}
+			if slices.Contains(addrs, n) {
+				add("%s.listen: %s is listed twice", f, n)
+				continue
+			}
+			addrs = append(addrs, n)
+		}
+		ra.Listen = addrs
 		// keys
 		srcs := 0
 		for _, s := range []string{a.Key, a.KeyEnv, a.KeyFile} {
@@ -348,38 +372,52 @@ func Parse(b []byte, path string, getenv func(string) string) (*Resolved, error)
 			ra.HeaderCheck = false
 		}
 		// listen sharing
-		if a.Listen != "" && ra.Kind != "" {
-			l := listens[a.Listen]
+		for _, addr := range ra.Listen {
+			if ra.Kind == "" {
+				break
+			}
+			l := listens[addr]
 			tlsID := ""
 			if a.TLS != nil {
 				tlsID = a.TLS.Cert + "|" + a.TLS.Key
 			}
 			if l == nil {
 				l = &lsn{kind: ra.Kind, tls: tlsID, hosts: map[string]string{}}
-				listens[a.Listen] = l
+				listens[addr] = l
 			} else {
 				switch {
 				case l.kind == "tcp" || ra.Kind == "tcp":
-					add("%s.listen: %s is used by %s; a TCP app needs its own address", f, a.Listen, strings.Join(l.apps, ", "))
+					add("%s.listen: %s is used by %s; a TCP app needs its own address", f, addr, strings.Join(l.apps, ", "))
 				case l.tls != tlsID:
-					add("%s.tls: every app on %s must use the same tls files (%s)", f, a.Listen, strings.Join(l.apps, ", "))
+					add("%s.tls: every app on %s must use the same tls files (%s)", f, addr, strings.Join(l.apps, ", "))
 				}
 			}
 			l.apps = append(l.apps, a.Name)
 			if len(ra.Hosts) == 0 {
 				l.defaults++
 				if l.defaults > 1 {
-					add("%s.hosts: %s is shared: list the hosts of each app (only one app may have none)", f, a.Listen)
+					add("%s.hosts: %s is shared: list the hosts of each app (only one app may have none)", f, addr)
 				}
 			}
 			for _, hn := range ra.Hosts {
 				if other, ok := l.hosts[hn]; ok {
-					add("%s.hosts: %s on %s is already in %s", f, hn, a.Listen, other)
+					add("%s.hosts: %s on %s is already in %s", f, hn, addr, other)
 				}
 				l.hosts[hn] = a.Name
 			}
 		}
 		r.Apps = append(r.Apps, ra)
+	}
+	// 0.0.0.0:8080 and 203.0.113.5:8080 cannot both be bound
+	for addr := range listens {
+		host, port, _ := net.SplitHostPort(addr)
+		if ip, err := netip.ParseAddr(host); err == nil && ip.IsUnspecified() {
+			for other := range listens {
+				if oh, op, _ := net.SplitHostPort(other); op == port && oh != host {
+					add("listen: %s and %s overlap (every address and one of them, same port)", addr, other)
+				}
+			}
+		}
 	}
 	if len(p) > 0 {
 		return nil, p
@@ -404,10 +442,66 @@ func parsePrefix(s string) (netip.Prefix, error) {
 func (r *Resolved) Listens() (addrs []string, apps map[string][]ResolvedApp) {
 	apps = map[string][]ResolvedApp{}
 	for _, a := range r.Apps {
-		if !slices.Contains(addrs, a.Listen) {
-			addrs = append(addrs, a.Listen)
+		for _, l := range a.Listen {
+			if !slices.Contains(addrs, l) {
+				addrs = append(addrs, l)
+			}
+			apps[l] = append(apps[l], a)
 		}
-		apps[a.Listen] = append(apps[a.Listen], a)
 	}
 	return addrs, apps
+}
+
+// Addrs is one address or a list of them in YAML.
+type Addrs []string
+
+// UnmarshalYAML accepts "ip:port" and [ip:port, …].
+func (a *Addrs) UnmarshalYAML(n *yaml.Node) error {
+	switch n.Kind {
+	case yaml.ScalarNode:
+		*a = Addrs{n.Value}
+		return nil
+	case yaml.SequenceNode:
+		var l []string
+		if err := n.Decode(&l); err != nil {
+			return err
+		}
+		*a = l
+		return nil
+	}
+	return fmt.Errorf("line %d: listen must be an address or a list of addresses", n.Line)
+}
+
+var errAnyAddr = errors.New("every address")
+
+// normListen checks "ip:port" and returns it in canonical form; errAnyAddr
+// (with the canonical form) for no IP, 0.0.0.0 or [::].
+func normListen(s string) (string, error) {
+	host, port, err := net.SplitHostPort(strings.TrimSpace(s))
+	if err != nil {
+		return "", errors.New("not an address like 203.0.113.5:8080")
+	}
+	if n, err := net.LookupPort("tcp", port); err != nil || n == 0 {
+		return "", errors.New("bad port")
+	}
+	if host == "" {
+		return ":" + port, errAnyAddr
+	}
+	ip, err := netip.ParseAddr(host)
+	if err != nil {
+		return "", errors.New("the host must be an IP address of this server, not a name")
+	}
+	ip = ip.Unmap()
+	n := net.JoinHostPort(ip.String(), port)
+	if ip.IsUnspecified() {
+		return n, errAnyAddr
+	}
+	return n, nil
+}
+
+func portOf(s string) string {
+	if _, p, err := net.SplitHostPort(s); err == nil {
+		return p
+	}
+	return "8080"
 }

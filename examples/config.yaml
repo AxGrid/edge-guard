@@ -29,11 +29,17 @@ clusters:
 
 # Apps: one per site in the panel. The key is the site's origin-auth secret
 # (panel → Sites → the site → Backend protection → Current secret).
+#
+# listen: the IP of THIS server that the edge connects to, and the port —
+# never just ":8080": on a server with many addresses the guard takes only
+# the ones listed (`ip -4 -o addr show` lists them). Several addresses as a
+# list. Every address (0.0.0.0, [::]) only with `bind_any: true`.
+# In the panel, the site's pool server is exactly this IP:port.
 apps:
   # Two sites on one port, chosen by the Host header.
   - name: shop
     cluster: prod
-    listen: ":8080"
+    listen: 198.51.100.5:8080
     hosts: [shop.example.com, "*.shop.example.com"]
     to: http://127.0.0.1:3000
     key_env: SHOP_KEY               # from /etc/edge-guard/env (mode 600)
@@ -42,7 +48,7 @@ apps:
 
   - name: blog
     cluster: staging
-    listen: ":8080"
+    listen: 198.51.100.5:8080
     hosts: [blog.example.com]
     to: http://127.0.0.1:3001
     key_file: /etc/edge-guard/blog.key
@@ -51,7 +57,7 @@ apps:
   # gRPC to the service over h2c.
   - name: api
     cluster: prod
-    listen: ":8443"
+    listen: [198.51.100.5:8443, 198.51.100.6:8443]   # two addresses of this server
     tls: {cert: /etc/edge-guard/tls/api.pem, key: /etc/edge-guard/tls/api.key}
     to: http://127.0.0.1:9000
     protocol: h2                    # h1 (default) | auto | h2 (gRPC)
@@ -60,11 +66,13 @@ apps:
   # TCP: only the source address is checked (no headers in TCP).
   - name: postgres
     cluster: prod
-    listen: ":5432"
+    listen: 10.0.0.5:5432           # a private address: the edge reaches it over a VPN
     to: tcp://127.0.0.1:5433
     key_env: SHOP_KEY               # any key of the cluster: used to get the list
 
 # Other app fields:
+#   bind_any: true        allow listen on every address of the server
+#                         (":8080", "0.0.0.0:8080", "[::]:8080")
 #   header_check: false   accept requests from the nodes without the
 #                         origin-auth header (weaker: another site on the same
 #                         edge comes from the same addresses)

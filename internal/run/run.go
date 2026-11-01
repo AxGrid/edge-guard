@@ -514,7 +514,7 @@ func (m *Manager) serveTCP(l *listener) {
 // AppStatus is one app in the status.
 type AppStatus struct {
 	Name    string   `json:"name"`
-	Listen  string   `json:"listen"`
+	Listen  []string `json:"listen"`
 	Hosts   []string `json:"hosts,omitempty"`
 	To      string   `json:"to"`
 	Cluster string   `json:"cluster"`

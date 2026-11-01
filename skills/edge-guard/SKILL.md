@@ -1,61 +1,86 @@
 ---
 name: edge-guard
-description: Use this skill when the user wants a service (any language) to accept traffic only from the nodes of their edge cluster (the self-hosted Cloudflare-like proxy, panel.example.com / panel.staging.example.com) and answer 403 Forbidden to everyone else — by running the standalone edge-guard (github.com/axgrid/edge-guard; binary, systemd, Docker; a YAML config with several clusters, apps and hosts, reloaded without a restart) next to it, or by embedding the Go library github.com/axgrid/edge-guard. The allow-list comes from the edge panel API by a key (the site's origin-auth secret) and follows the cluster. Triggers on phrases like "edge-guard", "пускать только с нод edge", "белый список нод", "закрыть бэкенд от прямого доступа", "только через наш прокси", "403 если не с edge", "allow only edge nodes", "origin allowlist", "protect origin behind edge", "встрой edge-guard", "подключи guard", "чтобы бэкенд не был доступен напрямую", "конфиг edge-guard", "добавь приложение в edge-guard".
+description: Use this skill when the user wants a service (any language) to accept traffic only from the nodes of their edge cluster (a self-hosted Cloudflare-like proxy with a panel) and answer 403 Forbidden to everyone else — by installing and configuring the standalone edge-guard (github.com/AxGrid/edge-guard; Linux/macOS binaries, systemd, Docker; a YAML config with several clusters, apps, hosts and explicit IP binding, reloaded without a restart) next to the service, or by embedding the Go library github.com/axgrid/edge-guard. The allow-list comes from the edge panel API by a key (the site's origin-auth secret) and follows the cluster. Triggers on phrases like "edge-guard", "пускать только с нод edge", "белый список нод", "закрыть бэкенд от прямого доступа", "только через наш прокси", "403 если не с edge", "allow only edge nodes", "origin allowlist", "protect origin behind edge", "встрой edge-guard", "подключи guard", "поставь edge-guard", "чтобы бэкенд не был доступен напрямую", "конфиг edge-guard", "добавь приложение в edge-guard".
 ---
 
 # edge-guard
 
-`edge-guard` (repo `github.com/axgrid/edge-guard`, Apache-2.0; local checkout `<checkout>`)
-lets in only the **edge nodes** and answers **403 Forbidden** to everyone else.
+[edge-guard](https://github.com/AxGrid/edge-guard) (Apache-2.0) lets in only the **edge nodes** and answers
+**403 Forbidden** to everyone else.
 
-- **Where the list comes from:** the panel, `GET /api/guard/ips` with `Authorization: Bearer <key>`.
-- **How it stays fresh:**
-  - refreshed every minute;
-  - kept on disk, so a restart works without the panel;
-  - never emptied by a failed refresh;
-  - if the panel's name does not answer, the nodes are asked by IP with the panel's TLS name.
-- **HTTP is checked twice:** the source address, and the site's origin-auth header (`X-Edge-Auth` or the
-  site's own name) carrying the same key. Another site on the same edge comes from the same addresses but
-  does not know this secret.
-- **TCP:** address only.
+**Where the node list comes from and how it stays fresh:**
+- The panel serves it: `GET /api/guard/ips` with `Authorization: Bearer <key>`.
+- The guard refreshes it every minute.
+- It is kept on disk, so a restart works without the panel.
+- A failed refresh never empties it.
+- When the panel's name does not answer, the guard asks the nodes by IP with the panel's TLS name.
 
-There are two ways to use it:
-- **Standalone program**, any language. One app from flags, or a YAML config with several clusters, apps
-  and hosts (`Host` routing on a shared port). The config is reloaded on file change or SIGHUP without a
-  restart. A broken config is reported with its line, and the running config stays.
+**What is checked:**
+- **HTTP:** the source address, and the site's origin-auth header (`X-Edge-Auth` or the site's own name)
+  carrying the same key. Another site on the same edge comes from the same addresses but does not know this
+  secret.
+- **TCP:** the address only.
+
+**Ways to use it:**
+- **Standalone program** next to a service in any language. One app from flags, or a YAML config with
+  several clusters, apps and hosts (`Host` routing on a shared port). It is reloaded on file change or
+  SIGHUP without a restart. A broken config is reported with its line, and the running config stays.
 - **Go library:** `import guard "github.com/axgrid/edge-guard"`. It uses only the standard library.
 
-Read the repo's `README.md` and `examples/config.yaml` when you need a detail that is not here.
+**It listens only on the IP addresses that are named.** `:8080`, `0.0.0.0` and `[::]` are refused unless
+`bind_any: true`. This matters: the servers usually have many addresses.
+
+When something is not covered here, read the repo's `README.md` and `examples/config.yaml`:
+`https://raw.githubusercontent.com/AxGrid/edge-guard/main/README.md`.
 
 ## Workflow
 
-Do the steps in order. Skip a question that is already answered, but **never skip steps 1 and 2**.
+Do the steps in order. Skip a question that is already answered, but **never skip steps 1, 2 and 3**. Ask
+with `AskUserQuestion`.
+
+### 0 · Look around (no questions)
+
+- **Where the service runs:** this machine, or a server reached over SSH (then run the commands there).
+- **The OS and CPU:** `uname -sm`. Releases exist for Linux and macOS, amd64 and arm64.
+- **Is edge-guard already installed?**
+  - The version: `edge-guard -version`.
+  - A config: `/etc/edge-guard/config.yaml`.
+  - The service state: `systemctl status edge-guard`.
+
+  If a config exists, **add** an app to it rather than writing a new one.
+- **How the service runs and listens:**
+  - in the project: the port and the bind address;
+  - on the server: `ss -tlnp`.
+- **The server's addresses** (needed in step 3):
+  - Linux: `ip -o addr show scope global`;
+  - macOS: `ifconfig | grep 'inet '`.
 
 ### 1 · Ask: the cluster — panel URL and node addresses (mandatory)
 
-Use `AskUserQuestion`. Both are required:
+Both are required:
 - the **panel URL** is where the list comes from;
-- the **node addresses** are the fallback when the panel's name does not answer. Nodes added later are
-  learned from the panel by themselves.
+- the **node addresses** are the fallback when the panel's name does not resolve. Nodes added later are
+  learned by themselves.
 
-Offer the known clusters, plus "Other" for a new one. Several apps may use different clusters: ask per app
-when it matters.
+Offer the clusters from the table, plus "Other". Several apps may use different clusters: ask per app when
+it matters.
 
 <!-- Put your own clusters in this table when you install the skill. -->
 
 | Option | Panel | Nodes |
 |---|---|---|
 | prod | `https://panel.example.com` | `203.0.113.10, 203.0.113.20, 203.0.113.30` |
-| staging | `https://panel.staging.example.com` | `198.51.100.10, 198.51.100.20, 198.51.100.30` |
 
-These lists can be outdated. When the network allows, check that the panel serves the API:
+**Check that the panel serves the API**, from the server where the guard will run:
 
 ```sh
 curl -s -o /dev/null -w '%{http_code}\n' -H 'Authorization: Bearer x' https://<panel>/api/guard/ips
 ```
 
-- **401:** OK (the key is wrong on purpose).
-- **404:** the edge on the nodes is too old. Tell the user that the edge must be updated first.
+- **401:** good (the key is wrong on purpose).
+- **404:** the edge on the nodes is too old. Stop, and tell the user that the edge must be updated first.
+- **No answer:** try a node by IP:
+  `curl -sk --resolve <panel host>:443:<node IP> https://<panel host>/api/guard/ips -o /dev/null -w '%{http_code}'`.
 
 ### 2 · Ask: the key of each app (mandatory) and where it is kept
 
@@ -64,65 +89,96 @@ site → "Backend protection" → "Sign requests to the backend with a secret he
 characters, "Copy"). Each app is one site, so each has its own key. A TCP app may use any key of its
 cluster: it only needs the list.
 
-Ask with `AskUserQuestion`:
-1. **Is backend protection already on and saved for each site?** If not, the user turns it on and saves
-   the site **before** the guard starts. Otherwise:
+Ask:
+1. **Is backend protection on and saved for the site?** If not, the user turns it on and saves it **before**
+   the guard starts. Otherwise:
    - the panel answers 401 to the key;
    - the edge does not send the header, so every request gets 403.
-2. **Where are keys kept in this project?** Options: an env file (`/etc/edge-guard/env`, mode 600, read by
-   systemd), a key file (`key_file`, `root:edge-guard` 640), a Docker `--env-file` or secret, a Kubernetes
-   Secret, or the project's secret manager.
+2. **Where are keys kept?** Options:
+   - `/etc/edge-guard/env` (mode 600, read by systemd; recommended);
+   - a key file (`key_file`, `root:edge-guard`, mode 640);
+   - a Docker `--env-file` or secret;
+   - a Kubernetes Secret;
+   - the project's secret manager.
 
 Rules:
 - Never put a key in code, in a command line, in a config committed to git, or in chat output.
 - Do not ask the user to paste a secret into the chat. Write placeholders (`SHOP_KEY=<origin-auth secret of
-  site shop>`) and say where the real value goes.
-- **Rotation:**
-  1. In the panel: "Prepare a new secret".
-  2. Put it in `next_key_env` / `next_key_file`: both keys are accepted.
-  3. In the panel: "Switch to the new one".
-  4. Move it to the main key and remove the next one. A key file change is picked up without a restart;
-     an environment change needs `systemctl restart edge-guard`.
+  site shop>`) and tell them which file to put the value in.
+- If the user pastes one anyway, write it only into the env file, and do not repeat it.
 
-### 3 · Ask: how to run it, and the apps
+### 3 · Ask: which IP of the server to listen on (mandatory)
 
-Recommend from the project:
-- **A config file**: several services or sites on one server, or likely to grow. Recommended for servers.
-- **Flags**: one service, quick start.
-- **Go library**: the service is Go and owns its `http.Handler` / `net.Listener`. No extra process.
+The guard takes **only the IPs it is told**. Show the addresses from step 0 and ask:
+- **Which address does the edge connect to?** It is the address the site's pool server in the panel points
+  at. Several can be chosen (a list). Usually it is the public IPv4 that the user gave this service.
+  Private addresses (10.x, 192.168.x) fit only when the edge reaches the server through a VPN.
+- **The port:**
+  - The default suggestion is `8080`, or `8443` with TLS.
+  - Check it is free on that IP: `ss -tlnH 'sport = :<port>'`.
+  - The same port can be reused on another IP of the same server.
 
-For each app, ask what the code does not show:
+Rules:
+- Never write `:8080`, `0.0.0.0:…` or `[::]:…`. Use `bind_any: true` only when the user explicitly wants
+  every address, and then warn that other addresses of the server will take the port too.
+- The address must exist on the server, or the guard will not start: `edge-guard -check` warns about this.
+
+### 4 · Ask: how to run it, and the apps
+
+**Recommend a mode from the project:**
+- **A config file:** a server, several services or sites, or likely to grow. Recommended.
+- **Flags:** one service, quick start.
+- **Go library:** the service is Go and owns its `http.Handler` / `net.Listener`. No extra process.
+
+**For each app, ask what the code does not show:**
 - the **name**;
 - the **cluster**;
-- the **port the edge connects to**: the site's pool server is `<server>:<port>`;
-- **`hosts`**, when several sites share a port;
-- the **service address**: `to: http://127.0.0.1:3000`, `https://…` (with `insecure` for a self-signed
-  backend), or `tcp://…`;
-- `protocol: h2` for gRPC;
+- **`hosts`**, when several sites share an IP:port;
+- the **service address**:
+  - `to: http://127.0.0.1:<port>`;
+  - `https://…`, with `insecure: true` for a self-signed backend;
+  - `tcp://…`;
+  - `protocol: h2` for gRPC;
 - **TLS towards the edge** (`tls: {cert, key}`): the pool server is then `https://`;
-- **extra always-allowed sources** (`allow`, e.g. monitoring addresses; they need no header).
+- **always-allowed sources** (`allow: [monitoring IPs]`; they need no header).
 
-### 4 · Generate
+### 5 · Install
 
-**Install** (Linux, systemd). This installs the binary, the `edge-guard` user, `/etc/edge-guard` with an
-example config and the unit:
+**Linux with systemd** (amd64, arm64). The installer puts in:
+- the binary, after checking `SHA256SUMS`;
+- the `edge-guard` user;
+- `/etc/edge-guard` with an example config and an empty `env` file (mode 600);
+- the unit.
+
+It does not start the service.
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/axgrid/edge-guard/main/install.sh | sudo sh
+curl -fsSL https://raw.githubusercontent.com/AxGrid/edge-guard/main/install.sh | sudo sh
+# a fixed version: curl … | sudo VERSION=v0.1.0 sh
 ```
 
-Other sources:
-- Releases: `edge-guard-<linux|darwin>-<amd64|arm64>` with `SHA256SUMS` (other systems: `go install`).
-- `go install github.com/axgrid/edge-guard/cmd/edge-guard@latest`.
-- The image `ghcr.io/axgrid/edge-guard`.
-- The panel: `https://<panel>/download/edge-guard-linux-amd64`.
+**macOS, or Linux by hand:**
 
-If the GitHub repo is not public yet, build from the checkout:
 ```sh
-cd <checkout> && make dist   # dist/edge-guard-*
+OS=$(uname -s | tr A-Z a-z); ARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')
+BASE=https://github.com/AxGrid/edge-guard/releases/latest/download
+curl -fsSLO "$BASE/edge-guard-$OS-$ARCH" && curl -fsSLO "$BASE/SHA256SUMS"
+grep " edge-guard-$OS-$ARCH\$" SHA256SUMS | shasum -a 256 -c -
+sudo install -m 755 "edge-guard-$OS-$ARCH" /usr/local/bin/edge-guard
+edge-guard -version
 ```
 
-**Config** `/etc/edge-guard/config.yaml` (mode 640, group `edge-guard`). Write only the fields needed:
+On macOS, if the downloaded binary is blocked: `xattr -d com.apple.quarantine /usr/local/bin/edge-guard`.
+
+**Other sources:**
+- Go: `go install github.com/axgrid/edge-guard/cmd/edge-guard@latest`.
+- Docker: `ghcr.io/axgrid/edge-guard`.
+- Some panels also serve builds at `https://<panel>/download/edge-guard-linux-amd64`.
+
+### 6 · Configure
+
+**Config** `/etc/edge-guard/config.yaml` (owner `root:edge-guard`, mode 640). Write only the fields
+needed. When the file exists, add to `clusters` and `apps` and keep the rest.
 
 ```yaml
 state_dir: /var/lib/edge-guard
@@ -134,47 +190,60 @@ clusters:
 apps:
   - name: shop
     cluster: prod
-    listen: ":8080"
-    hosts: [shop.example.com]        # only when apps share the port
+    listen: 198.51.100.5:8080          # the IP from step 3 (a list for several)
+    hosts: [shop.example.com]          # only when apps share an IP:port
     to: http://127.0.0.1:3000
-    key_env: SHOP_KEY                # /etc/edge-guard/env: SHOP_KEY=<origin-auth secret>
+    key_env: SHOP_KEY                  # /etc/edge-guard/env: SHOP_KEY=<origin-auth secret>
   - name: db
     cluster: prod
-    listen: ":5432"
+    listen: 198.51.100.5:5432
     to: tcp://127.0.0.1:5433
     key_env: SHOP_KEY
 ```
 
-Config rules:
-- **Unknown fields are errors.**
+**Config rules:**
+- Unknown fields are errors.
 - **Keys:** exactly one of `key_env`, `key_file`, `key`.
-- **Shared ports:** each app on a shared HTTP port lists its `hosts` (exact names or `*.example.com`); one
-  app per port may have none (the default).
-- **TCP apps** need their own port, with no `hosts` and no `tls`.
-- **TLS:** apps on one port use the same `tls` files.
+- **Shared addresses:** each app on a shared HTTP IP:port lists its `hosts` (exact names or
+  `*.example.com`); one app per address may have none (the default).
+- **TCP apps** need their own IP:port, with no `hosts` and no `tls`.
+- **TLS:** apps on one IP:port use the same `tls` files.
+- `0.0.0.0:8085` with `bind_any` and `198.51.100.5:8085` together overlap, and are refused.
 
-Always validate what you wrote:
+**Validate, and fix until clean:**
 
 ```sh
-edge-guard -check -config /etc/edge-guard/config.yaml          # syntax, fields, keys present
-edge-guard -check -online -config /etc/edge-guard/config.yaml  # + fetch each list (site name, IPs)
+# the keys come from the env file into the environment, never into the command line
+sudo sh -c 'set -a; . /etc/edge-guard/env; exec runuser -u edge-guard -- edge-guard -check -config /etc/edge-guard/config.yaml'
+sudo sh -c 'set -a; . /etc/edge-guard/env; exec runuser -u edge-guard -- edge-guard -check -online -config /etc/edge-guard/config.yaml'
 ```
 
-**Reload:**
-- How: saving the file is enough (it is checked every 2 s), or `systemctl reload edge-guard`.
+- `-check` checks the syntax, the fields, that the keys are present, and that the IPs are on the machine
+  (a warning).
+- `-online` also fetches each app's list and prints the site name and node IPs.
+- Running it as `edge-guard` also proves that the user can read the key files.
+
+**The service itself** must listen only on `127.0.0.1`, or only inside the compose network, so nobody
+reaches it around the guard. Change its bind if needed, and tell the user.
+
+**Start:** `sudo systemctl enable --now edge-guard`, then `journalctl -u edge-guard -n 20`. Expect
+`listening addr=198.51.100.5:8080` and `edge-guard started`.
+
+**Changes later:**
+- Saving the config is enough: it is checked every 2 s. `systemctl reload edge-guard` works too.
 - **A broken file does not stop anything.** The log says `config NOT applied, the previous one keeps
-  running` with the line and the reason. The status shows `config.error`.
-- **Ports that stay are not reopened.**
-- **All or nothing.** A reload that cannot be applied changes nothing: a busy port, or no list from the
-  panel and no cache.
+  running` with the line. The status shows `config.error`.
+- **All or nothing.** A reload that cannot be applied changes nothing: a busy port, an IP that is not on the
+  server, or no list and no cache.
+- **Key changes:** a key-file change is picked up by itself; an env-file change needs
+  `systemctl restart edge-guard`.
+- **Rotation:**
+  1. In the panel: "Prepare a new secret".
+  2. Put it in `next_key_env` or `next_key_file`: both keys are accepted.
+  3. In the panel: "Switch to the new one".
+  4. Make it the main key and remove the next one.
 
-**systemd:**
-- The unit is `deploy/edge-guard.service` (installed by `install.sh`): user `edge-guard`,
-  `EnvironmentFile=-/etc/edge-guard/env`, `StateDirectory=edge-guard`, `ExecReload` = HUP,
-  `CAP_NET_BIND_SERVICE` for ports below 1024.
-- Start it: `systemctl enable --now edge-guard`.
-
-**Docker:**
+**Docker** (instead of systemd):
 
 ```sh
 docker run -d --name edge-guard --network host --restart unless-stopped \
@@ -182,18 +251,15 @@ docker run -d --name edge-guard --network host --restart unless-stopped \
   --env-file /etc/edge-guard/env ghcr.io/axgrid/edge-guard
 ```
 
-- Prefer `--network host`. With published ports, rootless Docker, Docker Desktop and userland-proxy setups
-  show the bridge gateway as the source, and then every request is refused.
-- In compose with published ports, check `log_level: debug`: refused lines show `remote=`, and it must be
-  the node's address.
-- The service then listens only inside the compose network, with no published port of its own.
+- Use `--network host`: the guard binds the server's IP itself, and sees the real source address.
+- With published ports, rootless Docker, Docker Desktop and userland-proxy setups show the bridge gateway
+  as the source, and then every request is refused.
 
 **Flags** (one app):
 
 ```sh
-EDGE_GUARD_KEY=… edge-guard -panel https://panel.example.com \
-  -nodes 203.0.113.10,203.0.113.20,203.0.113.30 \
-  -listen :8080 -to http://127.0.0.1:3000
+EDGE_GUARD_KEY=… edge-guard -panel https://panel.example.com -nodes 203.0.113.10,203.0.113.20 \
+  -listen 198.51.100.5:8080 -to http://127.0.0.1:3000
 ```
 
 Other flags: `-key-file`, `-allow`, `-tls-cert`/`-tls-key`, `-protocol h2`, `-status`, `-debug`.
@@ -205,7 +271,7 @@ import guard "github.com/axgrid/edge-guard"
 
 g, err := guard.New(ctx, guard.Config{
 	Panel:     "https://panel.example.com",
-	Nodes:     []string{"203.0.113.10", "203.0.113.20", "203.0.113.30"},
+	Nodes:     []string{"203.0.113.10", "203.0.113.20"},
 	Key:       os.Getenv("EDGE_GUARD_KEY"),
 	NextKey:   os.Getenv("EDGE_GUARD_NEXT_KEY"),
 	CacheFile: "/var/lib/<app>/edge-guard.json",
@@ -213,41 +279,45 @@ g, err := guard.New(ctx, guard.Config{
 	Log:       logger,
 })
 if err != nil { return err } // no panel and no cache: refuse to start open
-srv := &http.Server{Addr: ":8080", Handler: g.Handler(mux)} // 403 Forbidden to others, header removed
+srv := &http.Server{Addr: "198.51.100.5:8080", Handler: g.Handler(mux)} // the IP from step 3
 ```
 
 - **TCP:** `ln = g.Listener(ln)`.
 - **The visitor's address:** `g.ClientIP(r)`.
 - **Health:** `g.Status()` returns `site`, `ips`, `fetched_at`, `denied`, `last_error`.
-- **Module not fetchable** (repo private or not published; `go list -m github.com/axgrid/edge-guard@latest`
-  fails): copy `guard.go` (stdlib only; keep the license header) into the project as
-  `internal/edgeguard/guard.go`, rename the package to `edgeguard`, and note the source commit in a comment.
-  Never add a `replace` that points outside the project.
+- **Bind address in code:** put it in the app's own config with the same rule (an explicit IP), not
+  `":8080"`.
+- **Module not fetchable** (`go list -m github.com/axgrid/edge-guard@latest` fails, for example behind an
+  offline proxy): copy `guard.go` from the repo (stdlib only; keep the license header) into the project as
+  `internal/edgeguard/guard.go`, rename the package to `edgeguard`, and note the source commit. Never add a
+  `replace` that points outside the project.
 
 **Health checks from other sources** (a load balancer or monitoring) go through `allow` with their exact
-addresses, or to a separate port. Never exempt URL paths from the guard.
+addresses, or to a separate IP:port. Never exempt URL paths.
 
-### 5 · Verify
+### 7 · Panel and verification
 
-Tell the user these commands, and run them if you have access:
+Tell the user what to do in the panel, and run the checks you can:
 
-1. `edge-guard -check -online -config …` shows each app's site name and node IPs.
-2. The status at `curl -s 127.0.0.1:9102`:
+1. **In the panel:** the site's pool server is exactly `<IP from step 3>:<port>` (`https://` with `tls`).
+   Save. The health dots for that server turn green: checks come from the nodes with the header.
+2. **The status:** `curl -s 127.0.0.1:9102`.
    - `config.error` is empty;
-   - each app has `ips` and no `last_error`.
-3. From a machine that is not a node, `curl -i http://<server>:<port>/` returns `403 Forbidden`.
-4. Through the edge, `curl -i https://<site host>/` returns the service's answer.
-5. In the panel:
-   - the site's pool server is `<server>:<port>`;
-   - its health dots are green (checks come from the nodes with the header).
-6. The service listens only on `127.0.0.1` (or only inside the compose network), so the guard cannot be
-   bypassed on another port.
+   - every app has `ips` and no `last_error`.
+3. **From a machine that is not a node:** `curl -i http://<IP>:<port>/` returns `403 Forbidden`.
+4. **Through the edge:** `curl -i https://<site host>/` returns the service's answer.
+5. **Nothing else listens on that port on other addresses:** `ss -tlnp | grep :<port>` shows only the
+   chosen IPs.
 
 ## Troubleshooting
 
+- **The service does not start, "cannot assign requested address".** The IP in `listen` is not on this
+  server. Compare with `ip -o addr show`.
 - **Everything gets 403 right after the start.** Check:
   - the key: the log shows a panel 401;
   - backend protection is saved for the site, so the edge sends the header;
   - `log_level: debug`: refused lines show `remote=`. A gateway address there is the Docker issue above.
 - **A panel 404.** The edge is older than `/api/guard/ips`: update the edge on the nodes.
+- **A busy port.** Another program holds that IP:port, or something listens on `0.0.0.0:<port>`. Choose
+  another port, or ask the user.
 - **Behind an edge tunnel (`tunnel://name`)** you don't need the guard: the server has no open port.
