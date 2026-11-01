@@ -27,6 +27,16 @@ description: Use this skill when the user wants a service (any language) to acce
   SIGHUP without a restart. A broken config is reported with its line, and the running config stays.
 - **Go library:** `import guard "github.com/axgrid/edge-guard"`. It uses only the standard library.
 
+**The hop edge → guard is encrypted with cluster TLS** (`tls: cluster`, the default to offer):
+- **What it is:** mutual TLS 1.3 under the edge cluster's own CA.
+- **The guard's certificate:** the guard makes its own key and gets a certificate for its site from the panel
+  by the key. It renews it by itself after 2/3 of its 30 days, or at once after a CA rotation.
+- **Who can connect:** only edge nodes, which show a node client certificate. The nodes accept only the
+  guard of exactly this site.
+- **What it protects against:** a man in the middle can neither read nor impersonate either side.
+
+Plain HTTP on that hop is only for a private network or a VPN.
+
 **It listens only on the IP addresses that are named.** `:8080`, `0.0.0.0` and `[::]` are refused unless
 `bind_any: true`. This matters: the servers usually have many addresses.
 
@@ -114,7 +124,7 @@ The guard takes **only the IPs it is told**. Show the addresses from step 0 and 
   at. Several can be chosen (a list). Usually it is the public IPv4 that the user gave this service.
   Private addresses (10.x, 192.168.x) fit only when the edge reaches the server through a VPN.
 - **The port:**
-  - The default suggestion is `8080`, or `8443` with TLS.
+  - The default suggestion is `8443` with cluster TLS, or `8080` for plain HTTP.
   - Check it is free on that IP: `ss -tlnH 'sport = :<port>'`.
   - The same port can be reused on another IP of the same server.
 
@@ -130,6 +140,11 @@ Rules:
 - **Flags:** one service, quick start.
 - **Go library:** the service is Go and owns its `http.Handler` / `net.Listener`. No extra process.
 
+**TLS towards the edge.** Recommend **cluster TLS** (`tls: cluster`). Plain HTTP fits only when the edge
+reaches the server over a private network or a VPN; say that the hop is then unencrypted. Cluster TLS needs:
+- the panel to offer it: `edge-guard -check -online` prints `cluster TLS: available`;
+- an HTTP app (TCP apps cannot use it yet).
+
 **For each app, ask what the code does not show:**
 - the **name**;
 - the **cluster**;
@@ -139,7 +154,8 @@ Rules:
   - `https://…`, with `insecure: true` for a self-signed backend;
   - `tcp://…`;
   - `protocol: h2` for gRPC;
-- **TLS towards the edge** (`tls: {cert, key}`): the pool server is then `https://`;
+- **own certificate files instead of the cluster CA** (`tls: {cert, key}`), only if the user asks: then
+  the pool verifies them itself (a public CA, or `tls_ca_file` on every node);
 - **always-allowed sources** (`allow: [monitoring IPs]`; they need no header).
 
 ### 5 · Install
@@ -190,7 +206,8 @@ clusters:
 apps:
   - name: shop
     cluster: prod
-    listen: 198.51.100.5:8080          # the IP from step 3 (a list for several)
+    listen: 198.51.100.5:8443          # the IP from step 3 (a list for several)
+    tls: cluster                       # mutual TLS with the edge (recommended)
     hosts: [shop.example.com]          # only when apps share an IP:port
     to: http://127.0.0.1:3000
     key_env: SHOP_KEY                  # /etc/edge-guard/env: SHOP_KEY=<origin-auth secret>
@@ -207,7 +224,10 @@ apps:
 - **Shared addresses:** each app on a shared HTTP IP:port lists its `hosts` (exact names or
   `*.example.com`); one app per address may have none (the default).
 - **TCP apps** need their own IP:port, with no `hosts` and no `tls`.
-- **TLS:** apps on one IP:port use the same `tls` files.
+- **TLS:** apps on one IP:port use the same `tls`: all `cluster` (several sites can share it, chosen by SNI
+  `<site>.edge-guard`), or the same files.
+- **Cluster TLS files:** the guard keeps its key and certificate in `state_dir`
+  (`cluster-tls-*.key` mode 600, `.crt`). Never copy them to another server: a new guard gets its own.
 - `0.0.0.0:8085` with `bind_any` and `198.51.100.5:8085` together overlap, and are refused.
 
 **Validate, and fix until clean:**
@@ -226,8 +246,10 @@ sudo sh -c 'set -a; . /etc/edge-guard/env; exec runuser -u edge-guard -- edge-gu
 **The service itself** must listen only on `127.0.0.1`, or only inside the compose network, so nobody
 reaches it around the guard. Change its bind if needed, and tell the user.
 
-**Start:** `sudo systemctl enable --now edge-guard`, then `journalctl -u edge-guard -n 20`. Expect
-`listening addr=198.51.100.5:8080` and `edge-guard started`.
+**Start:** `sudo systemctl enable --now edge-guard`, then `journalctl -u edge-guard -n 20`. Expect:
+- `guard: cluster TLS certificate name=<site>.edge-guard`;
+- `listening addr=198.51.100.5:8443 tls=true`;
+- `edge-guard started`.
 
 **Changes later:**
 - Saving the config is enough: it is checked every 2 s. `systemctl reload edge-guard` works too.
@@ -259,7 +281,7 @@ docker run -d --name edge-guard --network host --restart unless-stopped \
 
 ```sh
 EDGE_GUARD_KEY=… edge-guard -panel https://panel.example.com -nodes 203.0.113.10,203.0.113.20 \
-  -listen 198.51.100.5:8080 -to http://127.0.0.1:3000
+  -tls cluster -listen 198.51.100.5:8443 -to http://127.0.0.1:3000 -state-dir /var/lib/edge-guard
 ```
 
 Other flags: `-key-file`, `-allow`, `-tls-cert`/`-tls-key`, `-protocol h2`, `-status`, `-debug`.
@@ -282,6 +304,14 @@ if err != nil { return err } // no panel and no cache: refuse to start open
 srv := &http.Server{Addr: "198.51.100.5:8080", Handler: g.Handler(mux)} // the IP from step 3
 ```
 
+**Go library with cluster TLS:** add `ClusterTLS: true` to the config, then serve TLS with the guard's
+config:
+
+```go
+ln, _ := tls.Listen("tcp", "198.51.100.5:8443", g.ServerTLS()) // add NextProtos for HTTP/2
+http.Serve(ln, g.Handler(mux))
+```
+
 - **TCP:** `ln = g.Listener(ln)`.
 - **The visitor's address:** `g.ClientIP(r)`.
 - **Health:** `g.Status()` returns `site`, `ips`, `fetched_at`, `denied`, `last_error`.
@@ -299,12 +329,24 @@ addresses, or to a separate IP:port. Never exempt URL paths.
 
 Tell the user what to do in the panel, and run the checks you can:
 
-1. **In the panel:** the site's pool server is exactly `<IP from step 3>:<port>` (`https://` with `tls`).
-   Save. The health dots for that server turn green: checks come from the nodes with the header.
+1. **In the panel:**
+   - With cluster TLS:
+     - the site's pool server is exactly `https://<IP from step 3>:<port>`;
+     - the pool's «TLS к edge-guard через CA кластера» is on (section «Протокол, проверки здоровья…»).
+
+     The «Защита бэкенда» snippet has a «Настроить пул» button that does both.
+   - Plain HTTP: the pool server is `http://<IP>:<port>`.
+
+   Save. The health dots for that server turn green: checks come from the nodes with the header and, with
+   cluster TLS, with their client certificate.
 2. **The status:** `curl -s 127.0.0.1:9102`.
    - `config.error` is empty;
    - every app has `ips` and no `last_error`.
-3. **From a machine that is not a node:** `curl -i http://<IP>:<port>/` returns `403 Forbidden`.
+3. **From a machine that is not a node:**
+   - cluster TLS: `curl -vk https://<IP>:<port>/` fails in the TLS handshake (no client certificate);
+   - plain HTTP: `curl -i http://<IP>:<port>/` returns `403 Forbidden`.
+
+   The status shows `tls.not_after` and `tls.issuer`.
 4. **Through the edge:** `curl -i https://<site host>/` returns the service's answer.
 5. **Nothing else listens on that port on other addresses:** `ss -tlnp | grep :<port>` shows only the
    chosen IPs.
@@ -317,7 +359,14 @@ Tell the user what to do in the panel, and run the checks you can:
   - the key: the log shows a panel 401;
   - backend protection is saved for the site, so the edge sends the header;
   - `log_level: debug`: refused lines show `remote=`. A gateway address there is the Docker issue above.
-- **A panel 404.** The edge is older than `/api/guard/ips`: update the edge on the nodes.
+- **A panel 404.** The edge is older than `/api/guard/ips` (or `/api/guard/cert`): update the edge on the
+  nodes.
+- **Cluster TLS: 502 at the edge, or `bad certificate` in the guard log.** Check:
+  - the pool has `cluster_tls` on and its server is `https://IP:port`;
+  - the guard runs with `tls: cluster`;
+  - the guard's status: `tls.last_error`, `tls.not_after`.
+
+  After a CA rotation the guard renews within a minute, and the old CA stays trusted 37 days.
 - **A busy port.** Another program holds that IP:port, or something listens on `0.0.0.0:<port>`. Choose
   another port, or ask the user.
 - **Behind an edge tunnel (`tunnel://name`)** you don't need the guard: the server has no open port.

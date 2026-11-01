@@ -6,8 +6,8 @@ of the nodes' addresses comes from the edge panel with a key and follows the clu
 within a minute, and a removed one is dropped.
 
 ```
- visitors ──▶ edge nodes ──▶ edge-guard :8080 ──▶ your service 127.0.0.1:3000
- anyone else ─────────────▶ edge-guard: 403 Forbidden
+ visitors ─HTTPS─▶ edge nodes ═mutual TLS (cluster CA)═▶ edge-guard :8443 ──▶ your service 127.0.0.1:3000
+ anyone else ──────────────────────────────────────────▶ edge-guard: refused
 ```
 
 Use it as a **standalone program** next to a service in any language, or embed it in a **Go program** as a
@@ -25,6 +25,16 @@ library. The library uses only the standard library.
     TLS name.
   - The last list is kept on disk, so a restart works while the panel is unreachable.
   - A failed refresh keeps the last list; it is never emptied.
+- **Encrypted and authenticated hop (cluster TLS).** With `tls: cluster` the hop edge → guard is mutual
+  TLS (TLS 1.3: ECDHE + AES-GCM/ChaCha20) under the edge cluster's own CA:
+  - the guard makes its own key (it never leaves the server) and gets a certificate for its site from the
+    panel by the key; it renews it after 2/3 of its 30 days, or at once after a CA rotation;
+  - only edge nodes connect: they must show a node client certificate of the same CA, and they accept only
+    the guard of exactly this site;
+  - a man in the middle can neither read the traffic nor pretend to be either side; recorded traffic stays
+    unreadable later too (forward secrecy).
+
+  Without it the hop is plain HTTP: use that only over a private network or a VPN.
 - **Explicit bind.** A guard listens only on the IP addresses you name (`198.51.100.5:8080`, or a list),
   never on every address of a server by accident: `:8080` and `0.0.0.0` are refused unless `bind_any:
   true`. This matters on servers with many addresses.
@@ -43,9 +53,14 @@ Behind an edge tunnel (`tunnel://name`) you don't need a guard: the server has n
 
 ## Requirements
 
-The edge must serve `GET /api/guard/ips` (edge after 2026-11). In the panel, the site must have **Backend
-protection** on, and the site must be saved before the guard starts: the edge then sends the header, and
-the panel knows the key.
+- **The edge:** it must serve `GET /api/guard/ips`. Cluster TLS also needs `POST /api/guard/cert` and the
+  cluster CA (edge from 2026-11).
+- **The site in the panel:**
+  - **Backend protection** is on and the site is saved before the guard starts, so the edge sends the
+    header and the panel knows the key.
+  - For cluster TLS, the site's pool:
+    - its server is `https://<IP>:<port>` of the guard;
+    - **«TLS к edge-guard через CA кластера»** (`cluster_tls`) is on.
 
 ## Install
 
@@ -70,8 +85,14 @@ Other ways:
 ```sh
 EDGE_GUARD_KEY='<origin-auth secret>' edge-guard \
   -panel https://panel.example.com -nodes 203.0.113.10,203.0.113.20 \
-  -listen 198.51.100.5:8080 -to http://127.0.0.1:3000
+  -tls cluster -listen 198.51.100.5:8443 -to http://127.0.0.1:3000
 ```
+
+**With `-tls cluster`:**
+- the site's pool server is `https://198.51.100.5:8443` with cluster TLS on;
+- the guard's key and certificate are kept in the state directory.
+
+**Without `-tls`:** the hop is plain HTTP, and the pool server is `http://198.51.100.5:8080`.
 
 `-listen` takes this server's IP (the one the edge connects to; `ip -4 -o addr show` lists them), several
 comma separated; every address only with `-bind-any`. Make the service itself listen on `127.0.0.1`, then
@@ -140,7 +161,8 @@ The full reference with comments is in [`examples/config.yaml`](examples/config.
 | `next_key_env` / `next_key_file` | The next secret during a rotation: both are accepted. |
 | `allow` | Addresses or prefixes always let in, without the header (monitoring). |
 | `header_check` | `false`: check only the address. This is weaker. |
-| `tls: {cert, key}` | Serve HTTPS on `listen`; all apps on that address must use the same files. |
+| `tls: cluster` | Cluster TLS (recommended): a certificate of the edge cluster's CA, obtained and renewed by itself, and only edge node client certificates are accepted. Apps of several sites may share an address; the edge picks by SNI `<site>.edge-guard`. The site's pool needs `cluster_tls` and `https://` servers. HTTP apps only. |
+| `tls: {cert, key}` | Serve HTTPS with your own files instead; all apps on that address must use the same files. |
 | `protocol` | To the service: `h1` (default), `auto`, or `h2` (gRPC; h2c for `http://`). |
 | `insecure` | Do not verify an `https://` service's certificate. |
 | `host_header` | `Host` sent to the service (default: as the edge sent it). |
@@ -222,6 +244,15 @@ srv := &http.Server{Addr: "198.51.100.5:8080", Handler: g.Handler(mux)} // the I
 | `g.ClientIP(r)` | The visitor's address (`X-Real-Ip` from a node, else the peer). |
 | `g.Status()` | `site`, `ips`, `fetched_at`, `denied`, `last_error`. |
 | `g.Refresh(ctx)` | Fetch now (it runs every minute by itself until `ctx` ends). |
+| `g.ServerTLS()` | With `Config.ClusterTLS`: the listener's TLS config (the guard's certificate, renewed on the fly; node client certificates required). Add `NextProtos` for HTTP/2. |
+
+Cluster TLS in your own server:
+
+```go
+g, err := guard.New(ctx, guard.Config{Panel: …, Nodes: …, Key: …, CacheFile: …, ClusterTLS: true})
+ln, _ := tls.Listen("tcp", "198.51.100.5:8443", g.ServerTLS())
+http.Serve(ln, g.Handler(mux))
+```
 
 ## Claude Code skill
 
@@ -244,8 +275,14 @@ edge-guard". You can put your clusters in the skill's table so it offers them.
 GET /api/guard/ips
 Authorization: Bearer <a site's origin-auth secret or its next secret>
 
-200 { "site": "shop", "header": "X-Edge-Auth", "ips": ["203.0.113.10", …], "refresh_seconds": 60 }
+200 { "site": "shop", "header": "X-Edge-Auth", "ips": ["203.0.113.10", …], "refresh_seconds": 60,
+      "ca": "<PEM: trusted cluster CAs>", "ca_active": "<sha256>", "server_name": "shop.edge-guard" }
 401 unknown key (failed attempts are limited per address: 30 / 10 min → 429)
+
+POST /api/guard/cert        (cluster TLS; same key)
+{ "csr": "<PEM CERTIFICATE REQUEST>" }
+200 { "site": "shop", "server_name": "shop.edge-guard", "cert": "<PEM>", "ca": "<PEM>", "not_after": … }
+429 more than 20 certificates per site and hour
 ```
 
 ## Building

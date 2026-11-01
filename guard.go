@@ -24,6 +24,7 @@
 package guard
 
 import (
+	"bytes"
 	"context"
 	"crypto/subtle"
 	"crypto/tls"
@@ -72,6 +73,16 @@ type Config struct {
 	// HTTPClient for the panel (default: 10 s timeout).
 	HTTPClient *http.Client
 	Log        *slog.Logger
+	// ClusterTLS: serve TLS with a certificate of the cluster's CA and
+	// accept only clients with a node certificate of that CA (mutual TLS
+	// between the edge and the guard). The guard makes its own key, gets the
+	// certificate from the panel with Key and renews it by itself; use
+	// ServerTLS() as the listener's TLS config. The site's pool in the panel
+	// needs cluster_tls.
+	ClusterTLS bool
+	// TLSDir keeps the key and the certificate across restarts (default:
+	// the directory of CacheFile; empty both: in memory only).
+	TLSDir string
 }
 
 // List is what the panel returned.
@@ -81,6 +92,11 @@ type List struct {
 	IPs       []string  `json:"ips"`
 	Refresh   int       `json:"refresh_seconds"`
 	FetchedAt time.Time `json:"fetched_at"`
+	// Cluster TLS (edges that support it): the trusted CAs (PEM), the
+	// fingerprint of the signing one, and the guard's TLS name.
+	CA         string `json:"ca,omitempty"`
+	CAActive   string `json:"ca_active,omitempty"`
+	ServerName string `json:"server_name,omitempty"`
 }
 
 // Guard checks addresses against the list of edge nodes.
@@ -94,6 +110,7 @@ type Guard struct {
 	denied atomic.Int64
 	mu     sync.Mutex
 	err    error // last refresh error (nil after a success)
+	tls    clusterTLS
 }
 
 // ErrNoList: the panel could not be reached and there is no cached list.
@@ -133,6 +150,11 @@ func New(ctx context.Context, cfg Config) (*Guard, error) {
 			return nil, fmt.Errorf("%w: %v", ErrNoList, err)
 		}
 	}
+	if cfg.ClusterTLS {
+		if err := g.startTLS(ctx); err != nil {
+			return nil, err
+		}
+	}
 	go g.loop(ctx)
 	return g, nil
 }
@@ -153,6 +175,9 @@ func (g *Guard) loop(ctx context.Context) {
 		}
 		if err := g.Refresh(ctx); err != nil && ctx.Err() == nil {
 			g.log.Warn("guard: refresh failed, keeping the last list", "err", err)
+		}
+		if g.cfg.ClusterTLS && ctx.Err() == nil {
+			g.maintainTLS(ctx)
 		}
 	}
 }
@@ -244,13 +269,21 @@ func (g *Guard) targets() []target {
 
 var errKey = errors.New("the panel does not know this key (it must be the site's origin-auth secret)")
 
-func (g *Guard) fetch(ctx context.Context, t target) (*List, error) {
-	req, err := http.NewRequestWithContext(ctx, "GET", t.base.String()+"/api/guard/ips", nil)
+// call sends one request to the panel at t with the key; 2xx bodies only.
+func (g *Guard) call(ctx context.Context, t target, method, path string, in []byte) ([]byte, error) {
+	var rd io.Reader
+	if in != nil {
+		rd = bytes.NewReader(in)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, t.base.String()+path, rd)
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("Authorization", "Bearer "+g.cfg.Key)
 	req.Header.Set("Accept", "application/json")
+	if in != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
 	client := g.client
 	if t.host != "" {
 		req.Host = t.host
@@ -266,9 +299,17 @@ func (g *Guard) fetch(ctx context.Context, t target) (*List, error) {
 	case resp.StatusCode == http.StatusUnauthorized:
 		return nil, errKey
 	case resp.StatusCode == http.StatusNotFound:
-		return nil, errors.New("HTTP 404: this edge has no /api/guard/ips yet (update edge on the nodes)")
-	case resp.StatusCode != http.StatusOK:
+		return nil, fmt.Errorf("HTTP 404: this edge has no %s yet (update edge on the nodes)", path)
+	case resp.StatusCode/100 != 2:
 		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	return body, nil
+}
+
+func (g *Guard) fetch(ctx context.Context, t target) (*List, error) {
+	body, err := g.call(ctx, t, "GET", "/api/guard/ips", nil)
+	if err != nil {
+		return nil, err
 	}
 	var l List
 	if err := json.Unmarshal(body, &l); err != nil {
@@ -397,11 +438,12 @@ func (g *Guard) List() *List { return g.list.Load() }
 
 // Status is for health pages and logs.
 type Status struct {
-	Site      string    `json:"site"`
-	IPs       []string  `json:"ips"`
-	FetchedAt time.Time `json:"fetched_at"`
-	Denied    int64     `json:"denied"`
-	LastError string    `json:"last_error,omitempty"`
+	Site      string     `json:"site"`
+	IPs       []string   `json:"ips"`
+	FetchedAt time.Time  `json:"fetched_at"`
+	Denied    int64      `json:"denied"`
+	LastError string     `json:"last_error,omitempty"`
+	TLS       *TLSStatus `json:"tls,omitempty"` // cluster TLS
 }
 
 // Status of the guard.
@@ -415,6 +457,10 @@ func (g *Guard) Status() Status {
 		st.LastError = g.err.Error()
 	}
 	g.mu.Unlock()
+	if g.cfg.ClusterTLS {
+		ts := g.tlsStatus()
+		st.TLS = &ts
+	}
 	return st
 }
 

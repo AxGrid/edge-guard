@@ -56,6 +56,7 @@ func main() {
 		nextEnv  = flag.String("next-key-env", "EDGE_GUARD_NEXT_KEY", "one app: the next key during a rotation (optional)")
 		allow    = flag.String("allow", "", "one app: addresses or prefixes always let in, comma separated")
 		noHeader = flag.Bool("no-header-check", false, "one app: accept requests from the nodes without the origin-auth header")
+		tlsMode  = flag.String("tls", "", `one app: "cluster" — TLS with a certificate of the edge cluster's CA (got and renewed by itself) and only node client certificates; the site's pool needs cluster_tls`)
 		tlsCert  = flag.String("tls-cert", "", "one app: serve HTTPS with this certificate (PEM)")
 		tlsKey   = flag.String("tls-key", "", "one app: key of -tls-cert")
 		insecure = flag.Bool("insecure", false, "one app: do not verify the certificate of an https:// service")
@@ -97,7 +98,13 @@ func main() {
 			f := false
 			c.Apps[0].HeaderCheck = &f
 		}
-		if *tlsCert != "" || *tlsKey != "" {
+		switch {
+		case *tlsMode == "cluster":
+			c.Apps[0].TLS = &config.TLS{Cluster: true}
+		case *tlsMode != "":
+			fmt.Fprintln(os.Stderr, `edge-guard: -tls takes "cluster" (or use -tls-cert and -tls-key)`)
+			os.Exit(2)
+		case *tlsCert != "" || *tlsKey != "":
 			c.Apps[0].TLS = &config.TLS{Cert: *tlsCert, Key: *tlsKey}
 		}
 		b, _ := yaml.Marshal(c)
@@ -180,6 +187,13 @@ func checkOnly(r *config.Resolved, online bool) int {
 			default:
 				l := g.List()
 				line += fmt.Sprintf("\n      panel: site %s, %d node address(es): %s", l.Site, len(l.IPs), strings.Join(l.IPs, " "))
+				switch {
+				case a.TLS != nil && a.TLS.Cluster && l.CA == "":
+					line += "\n      cluster TLS: NOT offered by this edge (update edge on the nodes)"
+					code = 1
+				case a.TLS != nil && a.TLS.Cluster:
+					line += "\n      cluster TLS: available, server name " + l.ServerName + "; the site's pool needs https:// servers and cluster_tls"
+				}
 			}
 			cancel()
 		}

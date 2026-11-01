@@ -72,7 +72,10 @@ type App struct {
 	Allow []string `yaml:"allow"`
 	// HeaderCheck: require the origin-auth header (default true; TCP: never).
 	HeaderCheck *bool `yaml:"header_check"`
-	// TLS serves HTTPS on Listen (every app on that address must use the same files).
+	// TLS serves HTTPS on Listen: "cluster" (a certificate of the edge
+	// cluster's CA, obtained and renewed by itself, and mutual TLS: only
+	// node client certificates — the site's pool needs cluster_tls), or
+	// {cert, key} files. Every app on an address uses the same kind.
 	TLS *TLS `yaml:"tls"`
 	// Insecure: do not verify the certificate of an https:// service.
 	Insecure bool `yaml:"insecure"`
@@ -83,10 +86,11 @@ type App struct {
 	Protocol string `yaml:"protocol"`
 }
 
-// TLS files (PEM).
+// TLS: cluster TLS or files (PEM).
 type TLS struct {
-	Cert string `yaml:"cert"`
-	Key  string `yaml:"key"`
+	Cluster bool   `yaml:"-"`
+	Cert    string `yaml:"cert"`
+	Key     string `yaml:"key"`
 }
 
 // Resolved is a checked config with the keys read.
@@ -344,7 +348,7 @@ func Parse(b []byte, path string, getenv func(string) string) (*Resolved, error)
 			}
 		}
 		ra.HeaderCheck = a.HeaderCheck == nil || *a.HeaderCheck
-		if a.TLS != nil {
+		if a.TLS != nil && !a.TLS.Cluster {
 			if a.TLS.Cert == "" || a.TLS.Key == "" {
 				add("%s.tls: cert and key are both required", f)
 			} else {
@@ -367,7 +371,7 @@ func Parse(b []byte, path string, getenv func(string) string) (*Resolved, error)
 				add("%s.hosts: a TCP app has no host names (one TCP app per listen address)", f)
 			}
 			if a.TLS != nil {
-				add("%s.tls: not for TCP apps (the TLS of the service passes through)", f)
+				add("%s.tls: not for TCP apps yet (the TLS of the service passes through)", f)
 			}
 			ra.HeaderCheck = false
 		}
@@ -377,10 +381,7 @@ func Parse(b []byte, path string, getenv func(string) string) (*Resolved, error)
 				break
 			}
 			l := listens[addr]
-			tlsID := ""
-			if a.TLS != nil {
-				tlsID = a.TLS.Cert + "|" + a.TLS.Key
-			}
+			tlsID := a.TLSKind()
 			if l == nil {
 				l = &lsn{kind: ra.Kind, tls: tlsID, hosts: map[string]string{}}
 				listens[addr] = l
@@ -389,7 +390,7 @@ func Parse(b []byte, path string, getenv func(string) string) (*Resolved, error)
 				case l.kind == "tcp" || ra.Kind == "tcp":
 					add("%s.listen: %s is used by %s; a TCP app needs its own address", f, addr, strings.Join(l.apps, ", "))
 				case l.tls != tlsID:
-					add("%s.tls: every app on %s must use the same tls files (%s)", f, addr, strings.Join(l.apps, ", "))
+					add("%s.tls: every app on %s must use the same tls (cluster, or the same files) (%s)", f, addr, strings.Join(l.apps, ", "))
 				}
 			}
 			l.apps = append(l.apps, a.Name)
@@ -450,6 +451,43 @@ func (r *Resolved) Listens() (addrs []string, apps map[string][]ResolvedApp) {
 		}
 	}
 	return addrs, apps
+}
+
+// UnmarshalYAML accepts "cluster" or {cert, key}.
+func (t *TLS) UnmarshalYAML(n *yaml.Node) error {
+	if n.Kind == yaml.ScalarNode {
+		if n.Value != "cluster" {
+			return fmt.Errorf("line %d: tls is \"cluster\" or {cert: …, key: …}", n.Line)
+		}
+		*t = TLS{Cluster: true}
+		return nil
+	}
+	type plain TLS
+	var p plain
+	if err := n.Decode(&p); err != nil {
+		return err
+	}
+	*t = TLS(p)
+	return nil
+}
+
+// MarshalYAML writes "cluster" back as a scalar (flags mode).
+func (t TLS) MarshalYAML() (any, error) {
+	if t.Cluster {
+		return "cluster", nil
+	}
+	return map[string]string{"cert": t.Cert, "key": t.Key}, nil
+}
+
+// TLSKind: "", "cluster" or "files:<cert>|<key>".
+func (a App) TLSKind() string {
+	switch {
+	case a.TLS == nil:
+		return ""
+	case a.TLS.Cluster:
+		return "cluster"
+	}
+	return "files:" + a.TLS.Cert + "|" + a.TLS.Key
 }
 
 // Addrs is one address or a list of them in YAML.

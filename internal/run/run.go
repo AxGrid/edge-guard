@@ -120,8 +120,9 @@ func (m *Manager) Apply(ctx context.Context, r *config.Resolved) error {
 			g, err := guard.New(gctx, guard.Config{
 				Panel: a.ClusterDef.Panel, Nodes: a.ClusterDef.Nodes, Key: a.KeyValue, NextKey: a.NextKey,
 				Allow: a.Allow, NoHeaderCheck: !a.HeaderCheck,
-				CacheFile: filepath.Join(stateDir, cacheName(a)),
-				Log:       m.Log.With("app", a.Name, "cluster", a.Cluster),
+				CacheFile:  filepath.Join(stateDir, cacheName(a)),
+				ClusterTLS: a.TLS != nil && a.TLS.Cluster,
+				Log:        m.Log.With("app", a.Name, "cluster", a.Cluster),
 			})
 			if err != nil {
 				cancel()
@@ -174,6 +175,10 @@ func (m *Manager) Apply(ctx context.Context, r *config.Resolved) error {
 	for _, addr := range addrs {
 		a := byAddr[addr][0]
 		if a.TLS == nil {
+			continue
+		}
+		if a.TLS.Cluster {
+			certs[addr] = m.clusterTLS(byAddr[addr], apps)
 			continue
 		}
 		c, err := tls.LoadX509KeyPair(a.TLS.Cert, a.TLS.Key)
@@ -582,9 +587,43 @@ func (m *Manager) startStatus(addr string) {
 
 // ---- helpers ----
 
+// clusterTLS is the TLS of a listener whose apps use cluster TLS: the
+// certificate by SNI (<site>.edge-guard; apps of several sites may share an
+// address), and node client certificates required.
+func (m *Manager) clusterTLS(list []config.ResolvedApp, apps []*app) *tls.Config {
+	var gs []*guard.Guard
+	for _, a := range list {
+		for _, ap := range apps {
+			if ap.cfg.Name == a.Name {
+				gs = append(gs, ap.g)
+			}
+		}
+	}
+	return &tls.Config{
+		MinVersion: tls.VersionTLS12,
+		GetConfigForClient: func(hello *tls.ClientHelloInfo) (*tls.Config, error) {
+			for _, g := range gs {
+				if l := g.List(); l != nil && strings.EqualFold(l.ServerName, hello.ServerName) {
+					return withALPN(g.ServerTLS()), nil
+				}
+			}
+			if len(gs) == 1 {
+				return withALPN(gs[0].ServerTLS()), nil
+			}
+			m.Log.Debug("cluster TLS: unknown server name", "sni", hello.ServerName, "remote", hello.Conn.RemoteAddr().String())
+			return nil, fmt.Errorf("unknown server name %q", hello.ServerName)
+		},
+	}
+}
+
+func withALPN(c *tls.Config) *tls.Config {
+	c.NextProtos = []string{"h2", "http/1.1"}
+	return c
+}
+
 func guardID(a config.ResolvedApp) string {
 	h := sha256.New()
-	fmt.Fprintf(h, "%s\x00%s\x00%s\x00%s\x00%s\x00%v", a.ClusterDef.Panel, strings.Join(a.ClusterDef.Nodes, ","), a.KeyValue, a.NextKey, strings.Join(a.Allow, ","), a.HeaderCheck)
+	fmt.Fprintf(h, "%s\x00%s\x00%s\x00%s\x00%s\x00%v\x00%v", a.ClusterDef.Panel, strings.Join(a.ClusterDef.Nodes, ","), a.KeyValue, a.NextKey, strings.Join(a.Allow, ","), a.HeaderCheck, a.TLS != nil && a.TLS.Cluster)
 	return hex.EncodeToString(h.Sum(nil))
 }
 
@@ -594,12 +633,7 @@ func cacheName(a config.ResolvedApp) string {
 	return a.Cluster + "-" + hex.EncodeToString(k[:6]) + ".json"
 }
 
-func tlsKey(a config.ResolvedApp) string {
-	if a.TLS == nil {
-		return ""
-	}
-	return a.TLS.Cert + "|" + a.TLS.Key
-}
+func tlsKey(a config.ResolvedApp) string { return a.TLSKind() }
 
 func listenList(r *config.Resolved) []string {
 	addrs, _ := r.Listens()

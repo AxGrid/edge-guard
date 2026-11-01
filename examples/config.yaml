@@ -36,10 +36,16 @@ clusters:
 # list. Every address (0.0.0.0, [::]) only with `bind_any: true`.
 # In the panel, the site's pool server is exactly this IP:port.
 apps:
-  # Two sites on one port, chosen by the Host header.
+  # Two sites on one port, chosen by the Host header (SNI with cluster TLS).
+  # tls: cluster — mutual TLS with the edge under the cluster's CA: the
+  # certificate is obtained and renewed by itself, only edge nodes connect.
+  # In the panel: pool server https://198.51.100.5:8443 + "TLS to edge-guard
+  # via the cluster CA" (cluster_tls). Recommended unless the edge reaches
+  # this server over a private network.
   - name: shop
     cluster: prod
-    listen: 198.51.100.5:8080
+    listen: 198.51.100.5:8443
+    tls: cluster
     hosts: [shop.example.com, "*.shop.example.com"]
     to: http://127.0.0.1:3000
     key_env: SHOP_KEY               # from /etc/edge-guard/env (mode 600)
@@ -48,16 +54,17 @@ apps:
 
   - name: blog
     cluster: staging
-    listen: 198.51.100.5:8080
+    listen: 198.51.100.5:8443
+    tls: cluster
     hosts: [blog.example.com]
     to: http://127.0.0.1:3001
     key_file: /etc/edge-guard/blog.key
 
-  # HTTPS towards the edge (the site's pool server is then https://host:8443),
-  # gRPC to the service over h2c.
+  # HTTPS with your own certificate files instead of the cluster CA (the
+  # pool then verifies them itself), gRPC to the service over h2c.
   - name: api
     cluster: prod
-    listen: [198.51.100.5:8443, 198.51.100.6:8443]   # two addresses of this server
+    listen: [198.51.100.5:9443, 198.51.100.6:9443]   # two addresses of this server
     tls: {cert: /etc/edge-guard/tls/api.pem, key: /etc/edge-guard/tls/api.key}
     to: http://127.0.0.1:9000
     protocol: h2                    # h1 (default) | auto | h2 (gRPC)

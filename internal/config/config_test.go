@@ -173,3 +173,38 @@ func TestKeyFile(t *testing.T) {
 		t.Errorf("%+v %v", r.Apps[0].KeyValue, r.Files)
 	}
 }
+
+func TestClusterTLSConfig(t *testing.T) {
+	in := `
+clusters: {a: {panel: https://p.example}}
+apps:
+  - {name: s, listen: "192.0.2.1:8443", hosts: [s.example.com], to: "http://127.0.0.1:2", key_env: SHOP_KEY, tls: cluster}
+  - {name: b, listen: "192.0.2.1:8443", hosts: [b.example.com], to: "http://127.0.0.1:3", key_env: DB_KEY, tls: cluster}
+`
+	r, err := Parse([]byte(in), "x.yaml", env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !r.Apps[0].TLS.Cluster || r.Apps[0].TLSKind() != "cluster" {
+		t.Fatalf("%+v", r.Apps[0].TLS)
+	}
+	bad := map[string]string{
+		`tls: clusterr`: `tls is "cluster" or {cert: …, key: …}`,
+		`tls: cluster
+  - {name: x, listen: "192.0.2.1:8443", hosts: [x.example.com], to: "http://127.0.0.1:2", key_env: SHOP_KEY, tls: {cert: /nope.pem, key: /nope.key}}`: "every app on 192.0.2.1:8443 must use the same tls",
+	}
+	for tail, want := range bad {
+		in := "clusters: {a: {panel: https://p.example}}\napps:\n  - {name: s, listen: \"192.0.2.1:8443\", hosts: [s.example.com], to: \"http://127.0.0.1:2\", key_env: SHOP_KEY}\n"
+		in = strings.Replace(in, "key_env: SHOP_KEY}", "key_env: SHOP_KEY, "+strings.SplitN(tail, "\n", 2)[0]+"}", 1)
+		if parts := strings.SplitN(tail, "\n", 2); len(parts) == 2 {
+			in += parts[1] + "\n"
+		}
+		if _, err := Parse([]byte(in), "x.yaml", env); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("%q: %v", tail, err)
+		}
+	}
+	tcp := "clusters: {a: {panel: https://p.example}}\napps:\n  - {name: d, listen: \"192.0.2.1:5432\", to: \"tcp://127.0.0.1:5433\", key_env: SHOP_KEY, tls: cluster}\n"
+	if _, err := Parse([]byte(tcp), "x.yaml", env); err == nil || !strings.Contains(err.Error(), "not for TCP apps yet") {
+		t.Errorf("tcp: %v", err)
+	}
+}
