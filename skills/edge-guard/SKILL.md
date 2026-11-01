@@ -112,7 +112,7 @@ curl -fsSL https://raw.githubusercontent.com/axgrid/edge-guard/main/install.sh |
 ```
 
 Other sources:
-- Releases: `edge-guard-<os>-<arch>` with `SHA256SUMS`.
+- Releases: `edge-guard-<linux|darwin>-<amd64|arm64>` with `SHA256SUMS` (other systems: `go install`).
 - `go install github.com/axgrid/edge-guard/cmd/edge-guard@latest`.
 - The image `ghcr.io/axgrid/edge-guard`.
 - The panel: `https://<panel>/download/edge-guard-linux-amd64`.

@@ -1,4 +1,4 @@
-# Push a tag v1.2.3: tests, binaries for every OS/CPU with SHA256SUMS on the
+# Push a tag v1.2.3: tests, Linux and macOS binaries (amd64, arm64) with SHA256SUMS on the
 # GitHub release, and the image ghcr.io/axgrid/edge-guard:1.2.3 (+ latest).
 name: release
 on:

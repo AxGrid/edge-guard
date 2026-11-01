@@ -47,14 +47,15 @@ the panel knows the key.
 ## Install
 
 ```sh
-# Linux with systemd: the binary, a user, /etc/edge-guard with an example config, the unit
+# Linux with systemd (amd64, arm64): the binary, a user, /etc/edge-guard with an example config, the unit
 curl -fsSL https://raw.githubusercontent.com/axgrid/edge-guard/main/install.sh | sudo sh
 ```
 
 Other ways:
 
 - **Binaries.** Download from [Releases](https://github.com/axgrid/edge-guard/releases):
-  `edge-guard-<linux|darwin|windows|freebsd>-<amd64|arm64>` with `SHA256SUMS`.
+  `edge-guard-<linux|darwin>-<amd64|arm64>` with `SHA256SUMS`. For other systems, use `go install` or
+  `GOOS=… GOARCH=… make build`.
 - **Go.** `go install github.com/axgrid/edge-guard/cmd/edge-guard@latest`.
 - **Docker.** `ghcr.io/axgrid/edge-guard` (see [Docker](#docker)).
 - **The edge panel** also serves builds at `https://<panel>/download/edge-guard-linux-amd64`.
@@ -232,7 +233,7 @@ Authorization: Bearer <a site's origin-auth secret or its next secret>
 ```sh
 make test     # gofmt, vet, tests with -race
 make build    # bin/edge-guard
-make dist     # every OS/CPU + SHA256SUMS into dist/
+make dist     # Linux and macOS (amd64, arm64) + SHA256SUMS into dist/
 ```
 
 A tag `v*` runs [`release.yml`](.github/workflows/release.yml), which publishes:

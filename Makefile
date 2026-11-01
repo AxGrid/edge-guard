@@ -15,11 +15,10 @@ build: ## Build bin/edge-guard for this machine
 
 ##@ Release
 
-dist: ## Build every OS/CPU into dist/ with SHA256SUMS
+dist: ## Build Linux and macOS (amd64, arm64) into dist/ with SHA256SUMS
 	rm -rf dist && mkdir -p dist
-	for os in linux darwin windows freebsd; do for arch in amd64 arm64; do \
-		ext=""; [ $$os = windows ] && ext=".exe"; \
-		GOOS=$$os GOARCH=$$arch CGO_ENABLED=0 go build -trimpath -ldflags "$(LDFLAGS)" -o dist/edge-guard-$$os-$$arch$$ext ./cmd/edge-guard || exit 1; \
+	for os in linux darwin; do for arch in amd64 arm64; do \
+		GOOS=$$os GOARCH=$$arch CGO_ENABLED=0 go build -trimpath -ldflags "$(LDFLAGS)" -o dist/edge-guard-$$os-$$arch ./cmd/edge-guard || exit 1; \
 	done; done
 	cd dist && sha256sum edge-guard-* > SHA256SUMS 2>/dev/null || shasum -a 256 edge-guard-* > SHA256SUMS
 

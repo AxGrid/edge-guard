@@ -16,6 +16,11 @@ case "$(uname -m)" in
   *) echo "unsupported CPU: $(uname -m)" >&2; exit 1 ;;
 esac
 OS=$(uname -s | tr '[:upper:]' '[:lower:]')
+if [ "$OS" != linux ]; then
+  echo "install.sh is for Linux with systemd. On macOS download edge-guard-darwin-$ARCH from" >&2
+  echo "https://github.com/$REPO/releases (or: go install github.com/$REPO/cmd/edge-guard@latest)." >&2
+  exit 1
+fi
 if [ "$VERSION" = latest ]; then
   BASE="https://github.com/$REPO/releases/latest/download"
 else
