@@ -57,6 +57,16 @@ type Config struct {
 	Nodes []string
 	// Key is the origin-auth secret of the site in the panel (24+ characters).
 	Key string
+	// GuardKey ("edgg.<guard>.…", from the panel's Guards page) instead of
+	// Key: this server is a guard that reports its Apps; sites are bound to
+	// them in the panel. Cluster TLS is always on, the node is trusted by
+	// its client certificate (no origin-auth header), and Check routes nothing:
+	// the caller picks the app by the X-Edge-Guard-App header.
+	GuardKey string
+	// Apps reported in guard mode (SetApps changes them).
+	Apps []App
+	// Hostname and Version are reported in guard mode.
+	Hostname, Version string
 	// NextKey is accepted in the header too while the secret is rotated.
 	NextKey string
 	// Allow are extra addresses or prefixes always let in (127.0.0.1,
@@ -88,6 +98,7 @@ type Config struct {
 // List is what the panel returned.
 type List struct {
 	Site      string    `json:"site"`
+	Guard     string    `json:"guard,omitempty"` // guard mode
 	Header    string    `json:"header"`
 	IPs       []string  `json:"ips"`
 	Refresh   int       `json:"refresh_seconds"`
@@ -122,7 +133,12 @@ func New(ctx context.Context, cfg Config) (*Guard, error) {
 	if cfg.Panel == "" && len(cfg.Nodes) == 0 {
 		return nil, errors.New("guard: Panel or Nodes is required")
 	}
-	if len(cfg.Key) < 24 {
+	if cfg.GuardKey != "" {
+		if !strings.HasPrefix(cfg.GuardKey, "edgg.") {
+			return nil, errors.New("guard: GuardKey is a key from the panel's Guards page (edgg.…)")
+		}
+		cfg.ClusterTLS, cfg.NoHeaderCheck, cfg.Key = true, true, ""
+	} else if len(cfg.Key) < 24 {
 		return nil, errors.New("guard: Key must be the site's origin-auth secret (24+ characters)")
 	}
 	if cfg.Panel != "" && !strings.Contains(cfg.Panel, "://") {
@@ -267,7 +283,7 @@ func (g *Guard) targets() []target {
 	return out
 }
 
-var errKey = errors.New("the panel does not know this key (it must be the site's origin-auth secret)")
+var errKey = errors.New("the panel does not know this key (the site's origin-auth secret, or a key from the Guards page)")
 
 // call sends one request to the panel at t with the key; 2xx bodies only.
 func (g *Guard) call(ctx context.Context, t target, method, path string, in []byte) ([]byte, error) {
@@ -279,7 +295,7 @@ func (g *Guard) call(ctx context.Context, t target, method, path string, in []by
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Authorization", "Bearer "+g.cfg.Key)
+	req.Header.Set("Authorization", "Bearer "+g.key())
 	req.Header.Set("Accept", "application/json")
 	if in != nil {
 		req.Header.Set("Content-Type", "application/json")
@@ -306,14 +322,57 @@ func (g *Guard) call(ctx context.Context, t target, method, path string, in []by
 	return body, nil
 }
 
+// App is one application reported in guard mode.
+type App struct {
+	Name   string   `json:"name"`
+	Kind   string   `json:"kind"`   // http | tcp
+	Listen []string `json:"listen"` // the addresses the nodes connect to
+	Hosts  []string `json:"hosts"`  // suggested domains
+}
+
+func (g *Guard) key() string {
+	if g.cfg.GuardKey != "" {
+		return g.cfg.GuardKey
+	}
+	return g.cfg.Key
+}
+
+// SetApps replaces the reported apps (guard mode) and reports them at once.
+func (g *Guard) SetApps(ctx context.Context, apps []App) {
+	g.mu.Lock()
+	g.cfg.Apps = apps
+	g.mu.Unlock()
+	go func() {
+		if err := g.Refresh(ctx); err != nil && ctx.Err() == nil {
+			g.log.Warn("guard: report failed", "err", err)
+		}
+	}()
+}
+
 func (g *Guard) fetch(ctx context.Context, t target) (*List, error) {
-	body, err := g.call(ctx, t, "GET", "/api/guard/ips", nil)
+	var body []byte
+	var err error
+	if g.cfg.GuardKey != "" {
+		g.mu.Lock()
+		apps := g.cfg.Apps
+		g.mu.Unlock()
+		if apps == nil {
+			apps = []App{}
+		}
+		in, _ := json.Marshal(map[string]any{"hostname": g.cfg.Hostname, "edge_guard": g.cfg.Version, "apps": apps})
+		body, err = g.call(ctx, t, "POST", "/api/guard/register", in)
+	} else {
+		body, err = g.call(ctx, t, "GET", "/api/guard/ips", nil)
+	}
 	if err != nil {
 		return nil, err
 	}
 	var l List
 	if err := json.Unmarshal(body, &l); err != nil {
 		return nil, fmt.Errorf("bad answer: %w", err)
+	}
+	if l.Site == "" {
+		l.Site = l.Guard // guard mode: the guard's name
 	}
 	if len(l.IPs) == 0 {
 		return nil, errors.New("the panel returned no node addresses")

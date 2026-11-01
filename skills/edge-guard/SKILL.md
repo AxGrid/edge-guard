@@ -92,7 +92,31 @@ curl -s -o /dev/null -w '%{http_code}\n' -H 'Authorization: Bearer x' https://<p
 - **No answer:** try a node by IP:
   `curl -sk --resolve <panel host>:443:<node IP> https://<panel host>/api/guard/ips -o /dev/null -w '%{http_code}'`.
 
-### 2 · Ask: the key of each app (mandatory) and where it is kept
+### 2 · Ask: guard mode or a site key (mandatory), and the key
+
+**Recommend guard mode.** The server first, domains later, all by wizards in the panel:
+1. Panel → **Guards → «Добавить guard»**: a name gives the key `edgg.<guard>.…`, shown once, and a ready
+   setup.
+2. In the config, the **cluster** gets `guard_key_env: EDGE_GUARD_KEY`. The key goes into
+   `/etc/edge-guard/env`, and the apps need no keys.
+3. The guard registers itself and reports its apps.
+4. The user binds domains in the panel: guard page → app → **«Привязать домен»**. This creates the site,
+   with which nodes serve it, Let's Encrypt and the DNS record, and the pool server
+   `guard://<guard>/<app>`.
+
+What changes in guard mode:
+- **TLS:** cluster TLS is implied, so no `tls:` is needed.
+- **Trust:** nodes are trusted by their client certificate, so no origin-auth header.
+- **Shared ports:** apps may share one IP:port without `hosts`, because the node names the app.
+- **`hosts`:** only suggestions for the wizard.
+- **Behind NAT:** `public: <ip:port>` per app reports the address the nodes reach.
+
+Ask whether a guard already exists in the panel. If not, the user creates one on the Guards page; Claude
+cannot create it, because creating it needs a panel login. Then go to step 3.
+
+**A site key** (only when the site already exists and the user prefers it): the rest of this step.
+
+#### The key of each app (site-key mode) and where it is kept
 
 The key is the **origin-auth secret of the site** that proxies to this service. In the panel: Sites → the
 site → "Backend protection" → "Sign requests to the backend with a secret header" → "Current secret" (24+
@@ -195,6 +219,32 @@ On macOS, if the downloaded binary is blocked: `xattr -d com.apple.quarantine /u
 
 **Config** `/etc/edge-guard/config.yaml` (owner `root:edge-guard`, mode 640). Write only the fields
 needed. When the file exists, add to `clusters` and `apps` and keep the rest.
+
+Guard mode (recommended):
+
+```yaml
+state_dir: /var/lib/edge-guard
+status: 127.0.0.1:9102
+clusters:
+  prod:
+    panel: https://panel.example.com
+    nodes: [203.0.113.10, 203.0.113.20, 203.0.113.30]
+    guard_key_env: EDGE_GUARD_KEY      # /etc/edge-guard/env: EDGE_GUARD_KEY=edgg.<guard>.…
+apps:
+  - name: shop
+    cluster: prod
+    listen: 198.51.100.5:8443          # the IP from step 3
+    hosts: [shop.example.com]          # suggestions for «Привязать домен»
+    to: http://127.0.0.1:3000
+  - name: api
+    cluster: prod
+    listen: 198.51.100.5:8443          # same address: the node names the app
+    to: http://127.0.0.1:9000
+```
+
+Then tell the user to bind domains in the panel: Guards → the guard → app → «Привязать домен».
+
+Site-key mode:
 
 ```yaml
 state_dir: /var/lib/edge-guard

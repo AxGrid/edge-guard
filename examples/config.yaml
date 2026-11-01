@@ -20,6 +20,11 @@ log_level: info
 clusters:
   prod:
     panel: https://panel.example.com
+    # Guard mode (recommended): a key from the panel's Guards page. Apps of
+    # this cluster without a key of their own are reported to the panel,
+    # and domains are bound to them there ("Bind a domain"). Comment it out
+    # to use per-site keys (key_env on each app) instead.
+    # guard_key_env: EDGE_GUARD_KEY
     # asked directly (with the panel's TLS name) when the panel name does not
     # answer; nodes added later are learned from the panel by themselves
     nodes: [203.0.113.10, 203.0.113.20, 203.0.113.30]
@@ -85,3 +90,5 @@ apps:
 #                         edge comes from the same addresses)
 #   insecure: true        do not verify the certificate of an https:// service
 #   host_header: x        Host sent to the service (default: as the edge sent it)
+#   public: [ip:port]     guard mode: the address the nodes reach this app at,
+#                         reported instead of listen (behind NAT)

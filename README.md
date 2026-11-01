@@ -51,6 +51,35 @@ library. The library uses only the standard library.
 
 Behind an edge tunnel (`tunnel://name`) you don't need a guard: the server has no open port at all.
 
+## Two ways to connect a server
+
+**A guard (recommended): set up the server first, bind domains in the panel later.**
+1. Panel → **Guards → «Добавить guard»**: a name gives a key (`edgg.…`) and a ready setup.
+2. In the guard's config, the cluster gets `guard_key_env`, and the apps need no keys:
+   ```yaml
+   clusters:
+     prod:
+       panel: https://panel.example.com
+       nodes: [203.0.113.10, 203.0.113.20]
+       guard_key_env: EDGE_GUARD_KEY      # /etc/edge-guard/env: EDGE_GUARD_KEY=edgg.…
+   apps:
+     - {name: shop, listen: 198.51.100.5:8443, hosts: [shop.example.com], to: http://127.0.0.1:3000}
+     - {name: api,  listen: 198.51.100.5:8443, to: http://127.0.0.1:9000}
+   ```
+3. The guard registers itself: it reports its apps and addresses every minute, and at once after a config
+   change.
+4. In the panel the guard page lists them; **«Привязать домен»** on an app creates the site (domains, which
+   nodes, Let's Encrypt, the DNS record) with pool server `guard://<guard>/<app>`.
+
+In this mode:
+- cluster TLS is always on;
+- the guard trusts nodes by their client certificate, so no per-site secret is needed;
+- the node names the app in `X-Edge-Guard-App`, so apps can share one address without `hosts`;
+- `public:` sets the address reported for an app when the server is behind NAT.
+
+**A site's key:** the site already exists in the panel, and the guard uses its origin-auth secret
+(`key_env` on each app). This is the setup described in the rest of this README.
+
 ## Requirements
 
 - **The edge:** it must serve `GET /api/guard/ips`. Cluster TLS also needs `POST /api/guard/cert` and the
@@ -146,6 +175,7 @@ The full reference with comments is in [`examples/config.yaml`](examples/config.
 |---|---|
 | `state_dir`, `status`, `log_level` | As in the example above. |
 | `clusters.<name>.panel` / `.nodes` | Where the lists come from. At least one of the two. |
+| `clusters.<name>.guard_key_env` / `guard_key_file` / `guard_key` | Guard mode: the key from the panel's Guards page. Apps of this cluster without a key of their own are then reported to the panel. |
 
 **App fields:**
 
@@ -155,6 +185,7 @@ The full reference with comments is in [`examples/config.yaml`](examples/config.
 | `cluster` | May be left out when there is one cluster. |
 | `listen` | This server's IP and port, e.g. `198.51.100.5:8080` or `[2001:db8::5]:443`; a list for several addresses. No host names. `:8080`, `0.0.0.0:…` and `[::]:…` (every address) only with `bind_any: true`. `-check` warns about an IP that is not on the machine. |
 | `bind_any` | Allow `listen` on every address of the server. |
+| `public` | Guard mode: the IP:port the nodes reach the app at, reported instead of `listen` (NAT). |
 | `hosts` | Exact names or `*.example.com`. Needed when apps share `listen`; one app per address may have none (the default). An unknown host gets 403. |
 | `to` | `http://`, `https://` or `tcp://host:port`. |
 | `key_env` / `key_file` / `key` | The site's origin-auth secret. Use exactly one; prefer `key_env`. |
@@ -279,7 +310,12 @@ Authorization: Bearer <a site's origin-auth secret or its next secret>
       "ca": "<PEM: trusted cluster CAs>", "ca_active": "<sha256>", "server_name": "shop.edge-guard" }
 401 unknown key (failed attempts are limited per address: 30 / 10 min → 429)
 
-POST /api/guard/cert        (cluster TLS; same key)
+POST /api/guard/register    (guard mode; Authorization: Bearer edgg.…; every minute)
+{ "hostname": "srv-1", "edge_guard": "v0.3.0",
+  "apps": [ { "name": "shop", "kind": "http", "listen": ["198.51.100.5:8443"], "hosts": ["shop.example.com"] } ] }
+200 { "guard": "srv-1", "ips": [...], "ca": "<PEM>", "ca_active": "<sha256>", "server_name": "srv-1.guard.edge-guard" }
+
+POST /api/guard/cert        (cluster TLS; the site key or the guard key)
 { "csr": "<PEM CERTIFICATE REQUEST>" }
 200 { "site": "shop", "server_name": "shop.edge-guard", "cert": "<PEM>", "ca": "<PEM>", "not_after": … }
 429 more than 20 certificates per site and hour

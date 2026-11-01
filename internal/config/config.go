@@ -41,6 +41,13 @@ type Cluster struct {
 	Panel string `yaml:"panel"`
 	// Nodes: node addresses, asked directly when the panel name does not answer.
 	Nodes []string `yaml:"nodes"`
+	// Guard mode: a key from the panel's Guards page (edgg.…). This server
+	// then reports the cluster's apps to the panel and sites are bound to
+	// them there; the apps need no key of their own, use cluster TLS and
+	// trust the nodes by their client certificates.
+	GuardKey     string `yaml:"guard_key"`
+	GuardKeyEnv  string `yaml:"guard_key_env"`
+	GuardKeyFile string `yaml:"guard_key_file"`
 }
 
 // App is one protected service.
@@ -81,6 +88,9 @@ type App struct {
 	Insecure bool `yaml:"insecure"`
 	// HostHeader sent to the service (default: the one the edge sent).
 	HostHeader string `yaml:"host_header"`
+	// Public: the addresses the nodes reach this app at, when they differ
+	// from listen (behind NAT); reported in guard mode instead of listen.
+	Public Addrs `yaml:"public"`
 	// Protocol to the service: h1 (default), auto (https: HTTP/2 when
 	// offered) or h2 (HTTP/2 only: TLS for https, cleartext h2c for http — gRPC).
 	Protocol string `yaml:"protocol"`
@@ -112,6 +122,11 @@ type ResolvedApp struct {
 	Kind        string // "http" or "tcp"
 	Target      *url.URL
 	HeaderCheck bool
+	// GuardMode: the cluster has a guard key; GuardKey is it.
+	GuardMode bool
+	GuardKey  string
+	// Report: the addresses reported in guard mode (public, else listen).
+	Report []string
 }
 
 // Problems is every error found in a config.
@@ -182,6 +197,7 @@ func Parse(b []byte, path string, getenv func(string) string) (*Resolved, error)
 	if len(c.Clusters) == 0 {
 		add("clusters: at least one cluster is required")
 	}
+	guardKeys := map[string]string{}
 	names := make([]string, 0, len(c.Clusters))
 	for n := range c.Clusters {
 		names = append(names, n)
@@ -206,6 +222,35 @@ func Parse(b []byte, path string, getenv func(string) string) (*Resolved, error)
 				add("clusters.%s.nodes[%d]: empty", n, i)
 			}
 		}
+		gsrc := 0
+		for _, v := range []string{cl.GuardKey, cl.GuardKeyEnv, cl.GuardKeyFile} {
+			if v != "" {
+				gsrc++
+			}
+		}
+		if gsrc > 1 {
+			add("clusters.%s: give only one of guard_key_env, guard_key_file, guard_key", n)
+		}
+		gk := strings.TrimSpace(cl.GuardKey)
+		switch {
+		case cl.GuardKeyEnv != "":
+			if gk = strings.TrimSpace(getenv(cl.GuardKeyEnv)); gk == "" {
+				add("clusters.%s.guard_key_env: the environment variable %s is empty or not set", n, cl.GuardKeyEnv)
+			}
+		case cl.GuardKeyFile != "":
+			r.Files = append(r.Files, cl.GuardKeyFile)
+			kb, err := os.ReadFile(cl.GuardKeyFile)
+			if err != nil {
+				add("clusters.%s.guard_key_file: %v", n, err)
+			}
+			h.Write(kb)
+			gk = strings.TrimSpace(string(kb))
+		}
+		if gk != "" && !strings.HasPrefix(gk, "edgg.") {
+			add("clusters.%s: the guard key is a key from the panel's Guards page (edgg.…)", n)
+		}
+		h.Write([]byte(gk + "\x00"))
+		guardKeys[n] = gk
 	}
 	if len(c.Apps) == 0 {
 		add("apps: at least one app is required")
@@ -297,7 +342,29 @@ func Parse(b []byte, path string, getenv func(string) string) (*Resolved, error)
 				srcs++
 			}
 		}
+		if gk := guardKeys[ra.Cluster]; gk != "" && srcs == 0 {
+			// guard mode: the cluster's guard key, cluster TLS, nodes by certificate
+			ra.GuardMode, ra.GuardKey = true, gk
+			switch {
+			case ra.Kind == "http" && a.TLS == nil:
+				ra.TLS = &TLS{Cluster: true}
+			case ra.Kind == "http" && !a.TLS.Cluster:
+				add("%s.tls: in guard mode the app uses cluster TLS (leave tls out)", f)
+			}
+		}
+		for _, p := range a.Public {
+			n, err := normListen(p)
+			if err != nil {
+				add("%s.public: %q: an IP:port the nodes reach this app at", f, p)
+				continue
+			}
+			ra.Report = append(ra.Report, n)
+		}
+		if len(ra.Report) == 0 {
+			ra.Report = ra.Listen
+		}
 		switch {
+		case ra.GuardMode:
 		case srcs == 0:
 			add("%s: the key is required: key_env, key_file or key (the site's origin-auth secret)", f)
 		case srcs > 1:
@@ -347,7 +414,7 @@ func Parse(b []byte, path string, getenv func(string) string) (*Resolved, error)
 				add("%s.allow[%d]: %q is not an IP address or prefix", f, j, al)
 			}
 		}
-		ra.HeaderCheck = a.HeaderCheck == nil || *a.HeaderCheck
+		ra.HeaderCheck = (a.HeaderCheck == nil || *a.HeaderCheck) && !ra.GuardMode
 		if a.TLS != nil && !a.TLS.Cluster {
 			if a.TLS.Cert == "" || a.TLS.Key == "" {
 				add("%s.tls: cert and key are both required", f)
@@ -381,7 +448,7 @@ func Parse(b []byte, path string, getenv func(string) string) (*Resolved, error)
 				break
 			}
 			l := listens[addr]
-			tlsID := a.TLSKind()
+			tlsID := ra.TLSKind()
 			if l == nil {
 				l = &lsn{kind: ra.Kind, tls: tlsID, hosts: map[string]string{}}
 				listens[addr] = l
@@ -394,7 +461,7 @@ func Parse(b []byte, path string, getenv func(string) string) (*Resolved, error)
 				}
 			}
 			l.apps = append(l.apps, a.Name)
-			if len(ra.Hosts) == 0 {
+			if len(ra.Hosts) == 0 && !ra.GuardMode { // guard mode: the node names the app
 				l.defaults++
 				if l.defaults > 1 {
 					add("%s.hosts: %s is shared: list the hosts of each app (only one app may have none)", f, addr)

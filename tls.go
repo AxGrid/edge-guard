@@ -61,7 +61,7 @@ func (g *Guard) tlsDir() string {
 
 // tlsBase names this guard's files: one key/cert per panel and key.
 func (g *Guard) tlsBase() string {
-	h := sha256.Sum256([]byte(g.cfg.Panel + "\x00" + g.cfg.Key))
+	h := sha256.Sum256([]byte(g.cfg.Panel + "\x00" + g.key()))
 	return filepath.Join(g.tlsDir(), "cluster-tls-"+hex.EncodeToString(h[:6]))
 }
 

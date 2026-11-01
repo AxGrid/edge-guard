@@ -52,6 +52,17 @@ type guardEntry struct {
 	g      *guard.Guard
 	cancel context.CancelFunc
 	used   bool
+	report string // guard mode: the apps last reported (JSON)
+}
+
+func (e *guardEntry) setReport(apps []guard.App) {
+	b, _ := json.Marshal(apps)
+	e.report = string(b)
+}
+
+func (e *guardEntry) reported(apps []guard.App) bool {
+	b, _ := json.Marshal(apps)
+	return e.report == string(b)
 }
 
 type app struct {
@@ -60,7 +71,11 @@ type app struct {
 	handler http.Handler
 }
 
+// guardAppHeader names the app in requests from a node (guard mode).
+const guardAppHeader = "X-Edge-Guard-App"
+
 type routes struct {
+	guard map[string]*app // guard mode: by app name
 	exact map[string]*app
 	wild  []wildRoute // longest suffix first
 	def   *app
@@ -112,24 +127,43 @@ func (m *Manager) Apply(ctx context.Context, r *config.Resolved) error {
 		}
 	}
 	apps := make([]*app, 0, len(r.Apps))
+	// guard mode: one guard per cluster, reporting all its apps
+	reports := map[string][]guard.App{}
+	for _, a := range r.Apps {
+		if a.GuardMode {
+			reports[guardID(a)] = append(reports[guardID(a)], guard.App{Name: a.Name, Kind: a.Kind, Listen: a.Report, Hosts: append([]string{}, a.Hosts...)})
+		}
+	}
+	hostname, _ := os.Hostname()
 	for _, a := range r.Apps {
 		id := guardID(a)
 		e := m.guards[id]
+		if e != nil && a.GuardMode && !e.reported(reports[id]) {
+			e.setReport(reports[id])
+			e.g.SetApps(context.Background(), reports[id])
+		}
 		if e == nil {
 			gctx, cancel := context.WithCancel(context.Background())
-			g, err := guard.New(gctx, guard.Config{
+			gc := guard.Config{
 				Panel: a.ClusterDef.Panel, Nodes: a.ClusterDef.Nodes, Key: a.KeyValue, NextKey: a.NextKey,
 				Allow: a.Allow, NoHeaderCheck: !a.HeaderCheck,
 				CacheFile:  filepath.Join(stateDir, cacheName(a)),
 				ClusterTLS: a.TLS != nil && a.TLS.Cluster,
 				Log:        m.Log.With("app", a.Name, "cluster", a.Cluster),
-			})
+			}
+			if a.GuardMode {
+				gc.Key, gc.NextKey, gc.Allow = "", "", nil
+				gc.GuardKey, gc.Apps, gc.Hostname, gc.Version = a.GuardKey, reports[id], hostname, m.Version
+				gc.Log = m.Log.With("guard", a.Cluster)
+			}
+			g, err := guard.New(gctx, gc)
 			if err != nil {
 				cancel()
 				undo()
 				return fmt.Errorf("app %s: %w", a.Name, err)
 			}
 			e = &guardEntry{g: g, cancel: cancel}
+			e.setReport(reports[id])
 			m.guards[id] = e
 			fresh = append(fresh, id)
 		}
@@ -391,6 +425,21 @@ func (m *Manager) stopListener(l *listener, graceful bool) {
 
 func (m *Manager) route(l *listener, w http.ResponseWriter, r *http.Request) {
 	rt := l.routes.Load()
+	// guard mode: the node names the app; trusted only from a verified node
+	// (cluster TLS required a node client certificate for this connection)
+	if name := r.Header.Get(guardAppHeader); name != "" {
+		r.Header.Del(guardAppHeader)
+		if r.TLS != nil && len(r.TLS.PeerCertificates) > 0 {
+			if ap := rt.guard[name]; ap != nil {
+				ap.handler.ServeHTTP(w, r)
+				return
+			}
+			m.unknown.Add(1)
+			m.Log.Warn("guard: the node asked for an app that is not on this address", "app", name, "addr", l.addr)
+			http.Error(w, "Forbidden", http.StatusForbidden)
+			return
+		}
+	}
 	host := strings.ToLower(r.Host)
 	if h, _, err := net.SplitHostPort(host); err == nil {
 		host = h
@@ -418,9 +467,12 @@ func (m *Manager) route(l *listener, w http.ResponseWriter, r *http.Request) {
 }
 
 func buildRoutes(list []config.ResolvedApp, byName map[string]*app) *routes {
-	rt := &routes{exact: map[string]*app{}}
+	rt := &routes{exact: map[string]*app{}, guard: map[string]*app{}}
 	for _, a := range list {
 		ap := byName[a.Name]
+		if a.GuardMode {
+			rt.guard[a.Name] = ap
+		}
 		if len(a.Hosts) == 0 {
 			rt.def = ap
 		}
@@ -623,13 +675,21 @@ func withALPN(c *tls.Config) *tls.Config {
 
 func guardID(a config.ResolvedApp) string {
 	h := sha256.New()
+	if a.GuardMode { // one guard per cluster: its apps change without a new guard
+		fmt.Fprintf(h, "guard\x00%s\x00%s\x00%s", a.ClusterDef.Panel, strings.Join(a.ClusterDef.Nodes, ","), a.GuardKey)
+		return hex.EncodeToString(h.Sum(nil))
+	}
 	fmt.Fprintf(h, "%s\x00%s\x00%s\x00%s\x00%s\x00%v\x00%v", a.ClusterDef.Panel, strings.Join(a.ClusterDef.Nodes, ","), a.KeyValue, a.NextKey, strings.Join(a.Allow, ","), a.HeaderCheck, a.TLS != nil && a.TLS.Cluster)
 	return hex.EncodeToString(h.Sum(nil))
 }
 
 // cacheName: the list file of a cluster and key (the key itself is not in it).
 func cacheName(a config.ResolvedApp) string {
-	k := sha256.Sum256([]byte(a.ClusterDef.Panel + "\x00" + a.KeyValue))
+	key := a.KeyValue
+	if a.GuardMode {
+		key = a.GuardKey
+	}
+	k := sha256.Sum256([]byte(a.ClusterDef.Panel + "\x00" + key))
 	return a.Cluster + "-" + hex.EncodeToString(k[:6]) + ".json"
 }
 

@@ -175,19 +175,39 @@ func checkOnly(r *config.Resolved, online bool) int {
 		if len(a.Hosts) > 0 {
 			hosts = " hosts=" + strings.Join(a.Hosts, ",")
 		}
-		line := fmt.Sprintf("  %-16s %-8s %s → %s cluster=%s%s", a.Name, a.Kind, strings.Join(a.Listen, ","), a.To, a.Cluster, hosts)
+		mode := ""
+		if a.GuardMode {
+			mode = " guard-mode"
+		}
+		line := fmt.Sprintf("  %-16s %-8s %s → %s cluster=%s%s%s", a.Name, a.Kind, strings.Join(a.Listen, ","), a.To, a.Cluster, hosts, mode)
 		if online {
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-			g, err := guard.New(ctx, guard.Config{Panel: a.ClusterDef.Panel, Nodes: a.ClusterDef.Nodes, Key: a.KeyValue,
-				Log: slog.New(slog.DiscardHandler)})
+			gc := guard.Config{Panel: a.ClusterDef.Panel, Nodes: a.ClusterDef.Nodes, Key: a.KeyValue, Log: slog.New(slog.DiscardHandler)}
+			if a.GuardMode {
+				// registers all apps of the cluster, as the running guard does
+				hostname, _ := os.Hostname()
+				gc.Key, gc.GuardKey, gc.Hostname, gc.Version = "", a.GuardKey, hostname, version
+				for _, b := range r.Apps {
+					if b.GuardMode && b.Cluster == a.Cluster {
+						gc.Apps = append(gc.Apps, guard.App{Name: b.Name, Kind: b.Kind, Listen: b.Report, Hosts: append([]string{}, b.Hosts...)})
+					}
+				}
+			}
+			g, err := guard.New(ctx, gc)
 			switch {
 			case err != nil:
 				line += "\n      panel: " + strings.ReplaceAll(err.Error(), "\n", "\n      ")
 				code = 1
 			default:
 				l := g.List()
-				line += fmt.Sprintf("\n      panel: site %s, %d node address(es): %s", l.Site, len(l.IPs), strings.Join(l.IPs, " "))
+				what := "site"
+				if a.GuardMode {
+					what = "guard"
+				}
+				line += fmt.Sprintf("\n      panel: %s %s, %d node address(es): %s", what, l.Site, len(l.IPs), strings.Join(l.IPs, " "))
 				switch {
+				case a.GuardMode:
+					line += "\n      reported to the panel: bind a domain to it there (Guards → " + l.Site + " → " + a.Name + ")"
 				case a.TLS != nil && a.TLS.Cluster && l.CA == "":
 					line += "\n      cluster TLS: NOT offered by this edge (update edge on the nodes)"
 					code = 1

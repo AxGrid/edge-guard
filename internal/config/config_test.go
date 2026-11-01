@@ -208,3 +208,42 @@ apps:
 		t.Errorf("tcp: %v", err)
 	}
 }
+
+// Guard mode: the cluster's guard key, no app keys, cluster TLS implied,
+// several apps on one address without hosts, public addresses reported.
+func TestGuardMode(t *testing.T) {
+	getenv := func(k string) string {
+		return map[string]string{"G": "edgg.app-1.3fa2c1d0.0123456789abcdef0123456789abcdef"}[k]
+	}
+	in := `
+clusters:
+  prod: {panel: https://p.example, guard_key_env: G}
+apps:
+  - {name: shop, listen: "192.0.2.1:8443", to: "http://127.0.0.1:3000"}
+  - {name: api, listen: "192.0.2.1:8443", public: "203.0.113.7:8443", to: "http://127.0.0.1:3001"}
+  - {name: db, listen: "192.0.2.1:5432", to: "tcp://127.0.0.1:5433"}
+`
+	r, err := Parse([]byte(in), "x.yaml", getenv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, a := range r.Apps {
+		if !a.GuardMode || a.GuardKey == "" || a.HeaderCheck {
+			t.Errorf("%s: %+v", a.Name, a)
+		}
+	}
+	if !r.Apps[0].TLS.Cluster || r.Apps[2].TLS != nil {
+		t.Errorf("tls: %+v %+v", r.Apps[0].TLS, r.Apps[2].TLS)
+	}
+	if r.Apps[1].Report[0] != "203.0.113.7:8443" || r.Apps[0].Report[0] != "192.0.2.1:8443" {
+		t.Errorf("report: %v %v", r.Apps[1].Report, r.Apps[0].Report)
+	}
+	bad := strings.Replace(in, "guard_key_env: G", "guard_key: notakey", 1)
+	if _, err := Parse([]byte(bad), "x.yaml", getenv); err == nil || !strings.Contains(err.Error(), "Guards page") {
+		t.Errorf("bad guard key: %v", err)
+	}
+	files := strings.Replace(in, `to: "http://127.0.0.1:3000"}`, `to: "http://127.0.0.1:3000", tls: {cert: /a, key: /b}}`, 1)
+	if _, err := Parse([]byte(files), "x.yaml", getenv); err == nil || !strings.Contains(err.Error(), "uses cluster TLS") {
+		t.Errorf("files in guard mode: %v", err)
+	}
+}
