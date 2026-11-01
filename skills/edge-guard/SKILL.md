@@ -111,6 +111,24 @@ What changes in guard mode:
 - **`hosts`:** only suggestions for the wizard.
 - **Behind NAT:** `public: <ip:port>` per app reports the address the nodes reach.
 
+Guard mode needs edge-guard **v0.3.0 or later** (`edge-guard -version`) and an edge that serves
+`POST /api/guard/register`. `-check -online` already registers the apps, so the guard shows up in the
+panel before the service is started.
+
+**What the panel accepts in a guard's report** (otherwise the report is refused and the guard keeps the
+previous one; the error is in the guard's log):
+- **No local-only addresses.** `listen` (or `public`) must be an address the nodes can reach. Loopback
+  (`127.0.0.1`, `::1`), link-local (`169.254.x`, `fe80::`) and multicast are refused. To try a guard on
+  one machine with the panel, use the machine's LAN or public IP, not 127.0.0.1.
+- **A staff user's guard** may report only addresses inside the networks that user may use for upstream
+  servers (Settings → staff networks, or the user's own list), the same as servers they type into a pool.
+  An admin's guard may report any reachable address.
+- **At most 64 apps per guard.**
+- **At most 20 changes of the apps or addresses in 10 minutes.** Every change rewrites the cluster's config.
+  Do not script frequent config edits; an unchanged report costs nothing.
+- **No flood of requests:** at most 120 requests a minute from one source address to `/api/guard/*`. A
+  normal guard makes one a minute per cluster.
+
 Ask whether a guard already exists in the panel. If not, the user creates one on the Guards page; Claude
 cannot create it, because creating it needs a panel login. Then go to step 3.
 
@@ -419,4 +437,14 @@ Tell the user what to do in the panel, and run the checks you can:
   After a CA rotation the guard renews within a minute, and the old CA stays trusted 37 days.
 - **A busy port.** Another program holds that IP:port, or something listens on `0.0.0.0:<port>`. Choose
   another port, or ask the user.
+- **Guard mode, "not reachable from the nodes (loopback, link-local or multicast)".** The app's `listen`
+  is 127.0.0.1 or similar. Use the server's real IP, or set `public: <ip:port>` to the address the nodes
+  reach.
+- **Guard mode, "the guard's owner may not use this address".** The guard belongs to a staff user, and the
+  address is outside that user's allowed networks. An admin either widens the user's networks, or takes
+  over the guard (Guards → the guard → access → owner).
+- **Guard mode, "the guard's apps change too often" (HTTP 429).** More than 20 changes in 10 minutes. Wait,
+  and stop whatever rewrites the config in a loop.
+- **"too many requests" (HTTP 429)** on `/api/guard/*`: more than 120 a minute from this address, for
+  example many guards behind one NAT address restarting at once. It clears within a minute.
 - **Behind an edge tunnel (`tunnel://name`)** you don't need the guard: the server has no open port.

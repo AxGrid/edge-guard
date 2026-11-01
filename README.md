@@ -71,6 +71,15 @@ Behind an edge tunnel (`tunnel://name`) you don't need a guard: the server has n
 4. In the panel the guard page lists them; **«Привязать домен»** on an app creates the site (domains, which
    nodes, Let's Encrypt, the DNS record) with pool server `guard://<guard>/<app>`.
 
+What the panel accepts in a report (otherwise it is refused, and the guard keeps the previous one):
+- addresses the nodes can reach: no loopback, link-local or multicast. To try it on one machine, use its
+  LAN IP, not 127.0.0.1;
+- for a guard owned by a staff user, only addresses in that user's allowed upstream networks;
+- at most 64 apps, and at most 20 changes in 10 minutes;
+- at most 120 requests a minute per source address to `/api/guard/*`.
+
+Guard mode needs edge-guard v0.3.0 or later.
+
 In this mode:
 - cluster TLS is always on;
 - the guard trusts nodes by their client certificate, so no per-site secret is needed;
