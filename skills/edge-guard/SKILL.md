@@ -606,4 +606,14 @@ Tell the user what to do in the panel, and run the checks you can:
     - `tunnel: the edge rejected the token`: the key was revoked.
   - **The panel shows «нет соединения с нодами»:** look at `journalctl -u edge-guard` for
     `tunnel connected` / `node connected`.
+- **The service does not see HTTPS / `X-Forwarded-Proto` is missing.** edge-guard before v0.5.1 dropped
+  `X-Forwarded-Proto` and `X-Forwarded-Host` (Go's reverse proxy strips them). Update to v0.5.1+.
+- **The service wants TLS fingerprints (JA3 / JA4) or the header order.** Turn on «Передавать отпечатки
+  клиента (JA3 / JA4)» for the site in the panel (Site → Basics; API: `client_fingerprint: true`). The
+  service then gets `X-JA3`, `X-JA3N`, `X-JA4`, `X-TLS-Version`, and for HTTP/1.1 `X-Header-Order` and
+  `X-HTTP-FP` — the same names as Caddy's kiosk_fp; the guard passes them through.
+- **The service must not be cached (an API).** Edge caches only what the backend allows (`Cache-Control:
+  max-age`/`public`), never requests with `Authorization`, and with `Cookie` only if the site says so. To
+  be sure, list the API's prefixes in the site's «Пути без кэша» (`cache.bypass_paths: ["/api/"]`), or for
+  every host of a domain in the zone's «Пути, которые никогда не кэшируются» (`cache_bypass_paths`).
 - **Behind an edge tunnel (`tunnel://name`)** you don't need the guard: the server has no open port.

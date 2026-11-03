@@ -46,8 +46,16 @@ library. The library uses only the standard library.
   - Sockets that stay are not reopened.
   - A broken file is reported with its line in the log and in the status, and the running config stays.
     The same happens to a config that cannot be applied, for example a busy port.
-- **HTTP/1.1, HTTP/2, h2c (gRPC), WebSocket, streaming, TCP.** The visitor's address arrives from the edge
-  in `X-Real-Ip` and `X-Forwarded-For`, unchanged.
+- **HTTP/1.1, HTTP/2, h2c (gRPC), WebSocket, streaming, TCP.** What the edge tells the service arrives
+  unchanged (since v0.5.1):
+  - `X-Real-Ip` and `X-Forwarded-For` — the visitor's address only (the edge drops what a client sent);
+  - `X-Forwarded-Proto` (`https` when the visitor came over HTTPS) and `X-Forwarded-Host`;
+  - `X-Request-Id`;
+  - with the site's «client fingerprints» on: `X-JA3`, `X-JA3N`, `X-JA4`, `X-TLS-Version`, and for
+    HTTP/1.1 `X-Header-Order` and `X-HTTP-FP` (clients cannot forge them: the edge removes such headers).
+
+  For a request not from the edge (an `allow:` source) the guard sets `X-Forwarded-Proto` and
+  `X-Forwarded-Host` from its own connection.
 
 Behind an edge tunnel (`tunnel://name`) you don't need a guard: the server has no open port at all.
 

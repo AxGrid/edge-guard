@@ -628,8 +628,24 @@ func (m *Manager) proxy(a config.ResolvedApp) http.Handler {
 			if a.HostHeader != "" {
 				pr.Out.Host = a.HostHeader
 			}
-			// X-Forwarded-For / X-Real-Ip come from the edge unchanged
-			pr.Out.Header["X-Forwarded-For"] = pr.In.Header["X-Forwarded-For"]
+			// Rewrite has removed X-Forwarded-For/-Host/-Proto from Out: put
+			// back what the edge sent (the request passed the check, so it
+			// came from a node). X-Real-Ip and X-Request-Id pass as they are.
+			for _, k := range []string{"X-Forwarded-For", "X-Forwarded-Host", "X-Forwarded-Proto"} {
+				if v := pr.In.Header[k]; len(v) > 0 {
+					pr.Out.Header[k] = v
+				}
+			}
+			if pr.Out.Header.Get("X-Forwarded-Proto") == "" { // not from the edge (an allow: source)
+				proto := "http"
+				if pr.In.TLS != nil {
+					proto = "https"
+				}
+				pr.Out.Header.Set("X-Forwarded-Proto", proto)
+			}
+			if pr.Out.Header.Get("X-Forwarded-Host") == "" {
+				pr.Out.Header.Set("X-Forwarded-Host", pr.In.Host)
+			}
 		},
 		Transport:     tr,
 		FlushInterval: -1, // stream (SSE, gRPC, long polling)
