@@ -271,9 +271,9 @@ func (m *Manager) Apply(ctx context.Context, r *config.Resolved) error {
 		ap := &app{cfg: a, g: e.g, client: e.client}
 		switch {
 		case a.Client:
-			ap.handler = m.proxy(a) // the connection itself is the node's: no address check
+			ap.handler = redirects(a.Redirects, m.proxy(a)) // the connection itself is the node's: no address check
 		case a.Kind == "http":
-			ap.handler = e.g.Handler(m.proxy(a))
+			ap.handler = e.g.Handler(redirects(a.Redirects, m.proxy(a))) // checked first: only nodes get redirects
 		}
 		apps = append(apps, ap)
 	}

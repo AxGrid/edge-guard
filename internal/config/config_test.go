@@ -285,3 +285,42 @@ apps:
 		t.Errorf("normal mode without listen: %v", err)
 	}
 }
+
+func TestRedirectProblems(t *testing.T) {
+	t.Setenv("K", "0123456789abcdef0123456789")
+	_, err := Parse([]byte(`
+clusters:
+  a: {panel: https://p.example}
+apps:
+  - name: web
+    listen: 192.0.2.1:80
+    to: http://127.0.0.1:1
+    key_env: K
+    redirects:
+      - {path: admin, to: /admin/}
+      - {path: "/a*b", to: /x}
+      - {path: /, to: "ftp://x"}
+      - {path: /, to: /x, code: 200}
+      - {host: "a b", path: /, to: /x}
+      - {path: /}
+      - {host: admin.example.com, path: /, to: /admin/}
+`), "", os.Getenv)
+	if err == nil {
+		t.Fatal("bad redirects accepted")
+	}
+	for _, want := range []string{
+		"redirects[0].path: a path starting with /",
+		"redirects[1].path: * only at the end",
+		"redirects[2].to: a path (/admin/) or an http(s) URL",
+		"redirects[3].code: 301, 302, 303, 307 or 308",
+		"redirects[4].host: a host name",
+		"redirects[5].to: required",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("missing %q in:\n%v", want, err)
+		}
+	}
+	if strings.Contains(err.Error(), "redirects[6]") {
+		t.Errorf("a good redirect rejected:\n%v", err)
+	}
+}

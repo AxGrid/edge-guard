@@ -293,6 +293,15 @@ reaches the server over a private network or a VPN; say that the hop is then une
   - `https://…`, with `insecure: true` for a self-signed backend;
   - `tcp://…`;
   - `protocol: h2` for gRPC;
+- **redirects the service expects at the proxy** — e.g. the root of a name to a path
+  (`admin.example.com/` → `/admin/`). edge-guard answers them itself (since v0.5.0):
+  ```yaml
+  redirects:
+    - {host: admin.example.com, path: /, to: /admin/}        # code 302 by default; 301/303/307/308
+    - {path: /old/*, to: "/new/{rest}", code: 301}           # prefix; {rest} = what * matched, {host}
+  ```
+  First match wins; only requests from the nodes get them (others: 403); the query is kept. Every host
+  used in `redirects` must also be in the app's `hosts` (or the app is the address's default);
 - **own certificate files instead of the cluster CA** (`tls: {cert, key}`), only if the user asks: then
   the pool verifies them itself (a public CA, or `tls_ca_file` on every node);
 - **always-allowed sources** (`allow: [monitoring IPs]`; they need no header).

@@ -61,6 +61,9 @@ apps:
     key_env: SHOP_KEY               # from /etc/edge-guard/env (mode 600)
     # next_key_env: SHOP_NEXT_KEY   # during a secret rotation: both accepted
     allow: [127.0.0.1]              # always let in, no header needed (monitoring)
+    redirects:                      # answered by the guard itself (only to the nodes)
+      - {host: shop.example.com, path: /, to: /catalog/}            # code 302 by default
+      - {path: /old/*, to: "/new/{rest}", code: 301}                # {rest}: what * matched
 
   - name: blog
     cluster: staging

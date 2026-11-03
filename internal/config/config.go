@@ -103,6 +103,24 @@ type App struct {
 	// Protocol to the service: h1 (default), auto (https: HTTP/2 when
 	// offered) or h2 (HTTP/2 only: TLS for https, cleartext h2c for http — gRPC).
 	Protocol string `yaml:"protocol"`
+	// Redirects answered by the guard itself, before the service (only to
+	// requests that passed the check — from the edge nodes): e.g. the root
+	// of admin.example.com to /admin/. The first match wins.
+	Redirects []Redirect `yaml:"redirects"`
+}
+
+// Redirect: a request for Host (exact or *.example.com; empty: any host of
+// the app) and Path gets a redirect to To.
+type Redirect struct {
+	Host string `yaml:"host"`
+	// Path: exact ("/", "/old"), or a prefix ending in "*" ("/old/*").
+	Path string `yaml:"path"`
+	// To: a path ("/admin/") or a URL ("https://example.com/x"). {host} is
+	// the request's host, {rest} what "*" matched. The query is kept unless
+	// To has its own.
+	To string `yaml:"to"`
+	// Code: 301, 302 (default), 303, 307 or 308.
+	Code int `yaml:"code"`
 }
 
 // TLS: cluster TLS or files (PEM).
@@ -336,6 +354,33 @@ func Parse(b []byte, path string, getenv func(string) string) (*Resolved, error)
 		case "", "h1", "auto", "h2":
 		default:
 			add("%s.protocol: h1, auto or h2, not %q", f, a.Protocol)
+		}
+		for j, rd := range a.Redirects {
+			rf := fmt.Sprintf("%s.redirects[%d]", f, j)
+			switch {
+			case !strings.HasPrefix(rd.Path, "/"):
+				add("%s.path: a path starting with / (\"/\", \"/old\", \"/old/*\"), not %q", rf, rd.Path)
+			case strings.Contains(strings.TrimSuffix(rd.Path, "*"), "*"):
+				add("%s.path: * only at the end (\"/old/*\")", rf)
+			}
+			if rd.Host != "" && (strings.ContainsAny(rd.Host, " /:") || strings.Contains(strings.TrimPrefix(rd.Host, "*."), "*")) {
+				add("%s.host: a host name or *.example.com, not %q", rf, rd.Host)
+			}
+			if rd.To == "" {
+				add("%s.to: required (a path like /admin/ or a URL)", rf)
+			} else if !strings.HasPrefix(rd.To, "/") {
+				if u, err := url.Parse(strings.NewReplacer("{host}", "h", "{rest}", "r").Replace(rd.To)); err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+					add("%s.to: a path (/admin/) or an http(s) URL, not %q", rf, rd.To)
+				}
+			}
+			switch rd.Code {
+			case 0, 301, 302, 303, 307, 308:
+			default:
+				add("%s.code: 301, 302, 303, 307 or 308, not %d", rf, rd.Code)
+			}
+			if rd.Path == "/" && rd.Host == "" && len(a.Hosts) == 0 && strings.HasPrefix(rd.To, "/") && rd.To == "/" {
+				add("%s: redirects / to itself", rf)
+			}
 		}
 		// client mode: no listen, the guard's own connections to the nodes
 		clientMode := c.Clusters[ra.Cluster].Client

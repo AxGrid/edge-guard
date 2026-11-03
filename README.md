@@ -239,6 +239,36 @@ The full reference with comments is in [`examples/config.yaml`](examples/config.
 | `protocol` | To the service: `h1` (default), `auto`, or `h2` (gRPC; h2c for `http://`). |
 | `insecure` | Do not verify an `https://` service's certificate. |
 | `host_header` | `Host` sent to the service (default: as the edge sent it). |
+| `redirects` | Redirects the guard answers itself, before the service — see below. |
+
+**Redirects** (HTTP apps). A list; the first match wins. They are answered only to requests that passed
+the check (from the edge nodes); everyone else still gets 403.
+
+```yaml
+apps:
+  - name: kiosk
+    cluster: edge
+    listen: 198.51.100.5:8443
+    hosts: [kiosk.example.com, admin.kiosk.example.com]
+    to: http://127.0.0.1:3000
+    key_env: KIOSK_KEY
+    redirects:
+      - {host: admin.kiosk.example.com, path: /, to: /admin/}     # the root by name
+      - {host: kiosk.example.com, path: /, to: /kiosk/, code: 308}
+      - {path: /old/*, to: "/new/{rest}", code: 301}               # a prefix, for every host of the app
+      - {host: "*.shop.example.com", path: /, to: "https://{host}/store/"}
+```
+
+| field | |
+|---|---|
+| `host` | Exact name or `*.example.com`; empty: every host of the app. Compared without the port. |
+| `path` | Exact path (`/`, `/old`), or a prefix ending in `*` (`/old/*`). The query does not take part. |
+| `to` | A path (`/admin/`) or an `http(s)://` URL. `{host}`: the request's host; `{rest}`: what `*` matched (as sent, escaped). The request's query is appended unless `to` has its own `?`. |
+| `code` | `301`, `302` (default), `303`, `307` or `308`. Use 307/308 to keep the method and body of a POST. |
+
+Redirect answers carry `Cache-Control: no-store`, so a changed redirect takes effect on the next request
+(browsers otherwise keep a 301 forever). A redirect for the edge site as a whole (http → https, another
+domain) belongs in the panel; `redirects` are for paths inside the app.
 
 **Validation and reload:**
 - Unknown fields are errors: a typo must not silently turn protection off.
